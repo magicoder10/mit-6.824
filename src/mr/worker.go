@@ -21,14 +21,6 @@ type KeyValue struct {
 	Value string
 }
 
-// use ihash(key) % NReduce to choose the reduce
-// task number for each KeyValue emitted by Map.
-func ihash(key string) int {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32() & 0x7fffffff)
-}
-
 type MapFunc = func(string, string) []KeyValue
 type ReduceFunc = func(string, []string) string
 
@@ -122,10 +114,10 @@ func executeMapTask(
 	}
 
 	pairs := mapFunc(mapTaskReply.InputFilePath, string(buf))
-
-	intermediateFilePaths := make([]string, 0)
 	reducePartitionFiles := make([]*os.File, 0)
 	reducePartitionEncoder := make([]*json.Encoder, 0)
+	intermediateFilePaths := make([]string, 0)
+
 	for reducePartitionIndex := 0; reducePartitionIndex < mapTaskReply.ReducePartitions; reducePartitionIndex++ {
 		file, err := os.CreateTemp(tmpFileDir, intermediateFileName(taskID, reducePartitionIndex))
 		if err != nil {
@@ -166,7 +158,6 @@ func executeReduceTask(
 	reduceFunc ReduceFunc,
 ) error {
 	keyValues := make([]KeyValue, 0)
-	//keyValues := make(map[string][]string)
 	for _, filePath := range reduceTaskReply.IntermediateFilePaths {
 		file, err := os.Open(filePath)
 		if err != nil {
@@ -181,13 +172,6 @@ func executeReduceTask(
 			}
 
 			keyValues = append(keyValues, kv)
-			//values, ok := keyValues[kv.Key]
-			//if !ok {
-			//	values = nil
-			//}
-			//
-			//values = append(values, kv.Value)
-			//keyValues[kv.Key] = values
 		}
 	}
 
@@ -272,4 +256,12 @@ func call(rpcname string, args interface{}, reply interface{}) (bool, error) {
 
 	log.Println(err)
 	return false, nil
+}
+
+// use ihash(key) % NReduce to choose the reduce
+// task number for each KeyValue emitted by Map.
+func ihash(key string) int {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return int(h.Sum32() & 0x7fffffff)
 }

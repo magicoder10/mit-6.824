@@ -87,11 +87,6 @@ type Coordinator struct {
 	mut                   sync.Mutex
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
 func (c *Coordinator) RequestTask(args *Empty, reply *RequestTaskReply) error {
 	c.mut.Lock()
 	defer c.mut.Unlock()
