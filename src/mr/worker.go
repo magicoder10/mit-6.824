@@ -121,10 +121,7 @@ func executeMapTask(
 	for reducePartitionIndex := 0; reducePartitionIndex < mapTaskReply.ReducePartitions; reducePartitionIndex++ {
 		file, err := os.CreateTemp(tmpFileDir, intermediateFileName(taskID, reducePartitionIndex))
 		if err != nil {
-			for _, reducePartitionFile := range reducePartitionFiles {
-				reducePartitionFile.Close()
-			}
-
+			close(reducePartitionFiles)
 			return nil, err
 		}
 
@@ -137,14 +134,12 @@ func executeMapTask(
 		reducePartitionIndex := ihash(pair.Key) % mapTaskReply.ReducePartitions
 		err = reducePartitionEncoder[reducePartitionIndex].Encode(pair)
 		if err != nil {
+			close(reducePartitionFiles)
 			return nil, err
 		}
 	}
 
-	for _, reducePartitionFile := range reducePartitionFiles {
-		reducePartitionFile.Close()
-	}
-
+	close(reducePartitionFiles)
 	return intermediateFilePaths, nil
 }
 
@@ -158,12 +153,14 @@ func executeReduceTask(
 	reduceFunc ReduceFunc,
 ) error {
 	keyValues := make([]KeyValue, 0)
+	intermediateFiles := make([]*os.File, 0)
 	for _, filePath := range reduceTaskReply.IntermediateFilePaths {
 		file, err := os.Open(filePath)
 		if err != nil {
 			return err
 		}
 
+		intermediateFiles = append(intermediateFiles, file)
 		decoder := json.NewDecoder(file)
 		for {
 			var kv KeyValue
@@ -217,6 +214,7 @@ func executeReduceTask(
 		return err
 	}
 
+	close(intermediateFiles)
 	for _, filePath := range reduceTaskReply.IntermediateFilePaths {
 		os.Remove(filePath)
 	}
@@ -264,4 +262,10 @@ func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
+}
+
+func close(files []*os.File) {
+	for _, file := range files {
+		file.Close()
+	}
 }
