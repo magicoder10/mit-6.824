@@ -153,14 +153,12 @@ func executeReduceTask(
 	reduceFunc ReduceFunc,
 ) error {
 	keyValues := make([]KeyValue, 0)
-	intermediateFiles := make([]*os.File, 0)
 	for _, filePath := range reduceTaskReply.IntermediateFilePaths {
 		file, err := os.Open(filePath)
 		if err != nil {
 			return err
 		}
 
-		intermediateFiles = append(intermediateFiles, file)
 		decoder := json.NewDecoder(file)
 		for {
 			var kv KeyValue
@@ -170,6 +168,8 @@ func executeReduceTask(
 
 			keyValues = append(keyValues, kv)
 		}
+
+		file.Close()
 	}
 
 	outputTmpFile, err := os.CreateTemp(tmpFileDir, fmt.Sprintf("mr-out-%d.txt", taskID))
@@ -214,7 +214,6 @@ func executeReduceTask(
 		return err
 	}
 
-	close(intermediateFiles)
 	for _, filePath := range reduceTaskReply.IntermediateFilePaths {
 		os.Remove(filePath)
 	}
