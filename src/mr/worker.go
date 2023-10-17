@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net/rpc"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -121,7 +123,7 @@ func executeMapTask(
 	for reducePartitionIndex := 0; reducePartitionIndex < mapTaskReply.ReducePartitions; reducePartitionIndex++ {
 		file, err := os.CreateTemp(tmpFileDir, intermediateFileName(taskID, reducePartitionIndex))
 		if err != nil {
-			close(reducePartitionFiles)
+			closeFiles(reducePartitionFiles)
 			return nil, err
 		}
 
@@ -134,12 +136,12 @@ func executeMapTask(
 		reducePartitionIndex := ihash(pair.Key) % mapTaskReply.ReducePartitions
 		err = reducePartitionEncoder[reducePartitionIndex].Encode(pair)
 		if err != nil {
-			close(reducePartitionFiles)
+			closeFiles(reducePartitionFiles)
 			return nil, err
 		}
 	}
 
-	close(reducePartitionFiles)
+	closeFiles(reducePartitionFiles)
 	return intermediateFilePaths, nil
 }
 
@@ -152,24 +154,10 @@ func executeReduceTask(
 	reduceTaskReply ReduceTaskReply,
 	reduceFunc ReduceFunc,
 ) error {
+	keyValueCh := fetchKeyValuePairsForReduceTask(reduceTaskReply.IntermediateFilePaths)
 	keyValues := make([]KeyValue, 0)
-	for _, filePath := range reduceTaskReply.IntermediateFilePaths {
-		file, err := os.Open(filePath)
-		if err != nil {
-			return err
-		}
-
-		decoder := json.NewDecoder(file)
-		for {
-			var kv KeyValue
-			if err := decoder.Decode(&kv); err != nil {
-				break
-			}
-
-			keyValues = append(keyValues, kv)
-		}
-
-		file.Close()
+	for kv := range keyValueCh {
+		keyValues = append(keyValues, kv)
 	}
 
 	outputTmpFile, err := os.CreateTemp(tmpFileDir, fmt.Sprintf("mr-out-%d.txt", taskID))
@@ -221,6 +209,53 @@ func executeReduceTask(
 	return nil
 }
 
+func fetchKeyValuePairsForReduceTask(intermediateFilePaths []string) <-chan KeyValue {
+	keyValueCh := make(chan KeyValue)
+	go func() {
+		var syncErr error
+		once := sync.Once{}
+		wg := sync.WaitGroup{}
+		for _, filePath := range intermediateFilePaths {
+			wg.Add(1)
+			go func(filePath string) {
+				defer wg.Done()
+				file, err := os.Open(filePath)
+				if err != nil {
+					once.Do(func() {
+						syncErr = err
+					})
+					return
+				}
+
+				defer file.Close()
+				decoder := json.NewDecoder(file)
+				for {
+					var kv KeyValue
+					if err := decoder.Decode(&kv); err != nil {
+						if err == io.EOF {
+							break
+						} else {
+							once.Do(func() {
+								syncErr = err
+							})
+							return
+						}
+					}
+
+					keyValueCh <- kv
+				}
+			}(filePath)
+		}
+
+		wg.Wait()
+		close(keyValueCh)
+		if syncErr != nil {
+			log.Println(syncErr)
+		}
+	}()
+	return keyValueCh
+}
+
 func callRequestTask(reply *RequestTaskReply) (bool, error) {
 	return call("Coordinator.RequestTask", &Empty{}, reply)
 }
@@ -263,7 +298,7 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-func close(files []*os.File) {
+func closeFiles(files []*os.File) {
 	for _, file := range files {
 		file.Close()
 	}
