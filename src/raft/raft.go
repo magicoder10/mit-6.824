@@ -337,19 +337,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-//func (rf *Raft) ticker() {
-//	for rf.killed() == false {
-//
-//		// Your code here (2A)
-//		// Check if a leader election should be started.
-//
-//
-//		// pause for a random amount of time between 50 and 350
-//		// milliseconds.
-//		ms := 50 + (rand.Int63() % 300)
-//		time.Sleep(time.Duration(ms) * time.Millisecond)
-//	}
-//}
 
 func (rf *Raft) runAsFollower() {
 	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "enter runAsFollower")
@@ -397,9 +384,9 @@ func (rf *Raft) runAsFollower() {
 			electionTimerUnlocker.unlock(FollowerFlow)
 		}
 
-		startElectionTimerUnlocker = rf.lock(FollowerFlow)
+		endElectionTimerUnlocker = rf.lock(FollowerFlow)
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "end election timer")
-		startElectionTimerUnlocker.unlock(FollowerFlow)
+		endElectionTimerUnlocker.unlock(FollowerFlow)
 	}()
 }
 
@@ -408,9 +395,9 @@ func (rf *Raft) runAsCandidate() {
 	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "exit runAsCandidate")
 
 	go func() {
-		electionUnlocker := rf.lock(CandidateFlow)
+		startElectionTimerUnlocker := rf.lock(CandidateFlow)
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "start election timer")
-		electionUnlocker.unlock(CandidateFlow)
+		startElectionTimerUnlocker.unlock(CandidateFlow)
 
 		for !rf.killed() {
 			electionTimerUnlocker := rf.lock(CandidateFlow)
@@ -443,9 +430,9 @@ func (rf *Raft) runAsCandidate() {
 			electionTimerUnlocker.unlock(CandidateFlow)
 		}
 
-		electionUnlocker = rf.lock(CandidateFlow)
+		endElectionTimerUnlocker = rf.lock(CandidateFlow)
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "end election timer")
-		electionUnlocker.unlock(CandidateFlow)
+		endElectionTimerUnlocker.unlock(CandidateFlow)
 	}()
 }
 
@@ -725,6 +712,5 @@ func Make(
 	rf.applyCommittedEntries()
 	rf.runAsFollower()
 	// start ticker goroutine to start elections
-	//go rf.ticker()
 	return rf
 }
