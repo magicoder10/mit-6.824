@@ -337,7 +337,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-
 func (rf *Raft) runAsFollower() {
 	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "enter runAsFollower")
 	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "exit runAsFollower")
@@ -384,7 +383,7 @@ func (rf *Raft) runAsFollower() {
 			electionTimerUnlocker.unlock(FollowerFlow)
 		}
 
-		endElectionTimerUnlocker = rf.lock(FollowerFlow)
+		endElectionTimerUnlocker := rf.lock(FollowerFlow)
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "end election timer")
 		endElectionTimerUnlocker.unlock(FollowerFlow)
 	}()
@@ -430,7 +429,7 @@ func (rf *Raft) runAsCandidate() {
 			electionTimerUnlocker.unlock(CandidateFlow)
 		}
 
-		endElectionTimerUnlocker = rf.lock(CandidateFlow)
+		endElectionTimerUnlocker := rf.lock(CandidateFlow)
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "end election timer")
 		endElectionTimerUnlocker.unlock(CandidateFlow)
 	}()
