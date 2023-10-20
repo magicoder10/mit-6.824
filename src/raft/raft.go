@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	//	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -28,6 +27,10 @@ import (
 	"6.5840/labrpc"
 )
 
+const heartBeatInterval = 100 * time.Millisecond
+const electionBaseTimeOut = 400 * time.Millisecond
+const electionRandomTimeOutFactor = 7
+const electionRandomTimeOutMultiplier = 20 * time.Millisecond
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -50,28 +53,52 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type Role string
+
+const (
+	LeaderRole    Role = "Leader"
+	CandidateRole Role = "Candidate"
+	FollowerRole  Role = "Follower"
+)
+
+type LogEntry struct {
+	Command interface{}
+	Term    int
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
+	serverID  int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentRole Role
+	currentTerm int
+	votedFor    *int
+	logs        []LogEntry
 
+	receivedValidMessage bool
+	commitIndex          int
+	lastApplied          int
+
+	nextIndex          []int
+	matchIndex         []int
+	newCommandIndexChs []chan int
+	nextLockID         uint64
+	nextRequestID      uint64
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (2A).
-	return term, isleader
+	unlocker := rf.lock(StateFlow)
+	defer unlocker.unlock(StateFlow)
+	return rf.currentTerm, rf.currentRole == LeaderRole
 }
 
 // save Raft's persistent state to stable storage,
@@ -91,7 +118,6 @@ func (rf *Raft) persist() {
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
 }
-
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
@@ -113,7 +139,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -123,22 +148,58 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
+	Term         int
+	CandidateID  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	unlocker := rf.lock(ElectionFlow)
+	defer unlocker.unlock(ElectionFlow)
+
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "enter RequestVote")
+	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "exit RequestVote")
+
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "reject vote request from %v because of lower term", args.CandidateID)
+		reply.VoteGranted = false
+		return
+	}
+
+	// TODO: check if the candidate's log is at least as up-to-date as receiver's log
+	rf.receivedValidMessage = true
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "received valid message from %v", args.CandidateID)
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = nil
+
+		if rf.currentRole != FollowerRole {
+			rf.currentRole = FollowerRole
+			rf.runAsFollower()
+		}
+	}
+
+	if rf.votedFor != nil && *rf.votedFor != args.CandidateID {
+		reply.VoteGranted = false
+		return
+	}
+
+	reply.VoteGranted = true
+	rf.votedFor = &args.CandidateID
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -168,11 +229,61 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, flow Flow) bool {
+	unlocker := rf.lock(flow)
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "send RequestVote to %v", server)
+	unlocker.unlock(flow)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
 
+type AppendEntriesArgs struct {
+	Term              int
+	LeaderID          int
+	PrevLogIndex      int
+	PreLogTerm        int
+	LogEntries        []LogEntry
+	LeaderCommitIndex int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	unlocker := rf.lock(LogReplicationFlow)
+	defer unlocker.unlock(LogReplicationFlow)
+
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "enter AppendEntries")
+	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "exit AppendEntries")
+
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		return
+	}
+
+	rf.receivedValidMessage = true
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = nil
+	}
+
+	if rf.currentRole != FollowerRole {
+		rf.currentRole = FollowerRole
+		rf.runAsFollower()
+		return
+	}
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, flow Flow) bool {
+	unlocker := rf.lock(flow)
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "send AppendEntries to %v", server)
+	unlocker.unlock(flow)
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -187,14 +298,24 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	unlocker := rf.lock(LeaderFlow)
+	defer unlocker.unlock(LeaderFlow)
 
-	// Your code here (2B).
+	if !rf.killed() && rf.currentRole == LeaderRole {
+		rf.logs = append(rf.logs, LogEntry{
+			Command: command,
+			Term:    rf.currentTerm,
+		})
+		index := len(rf.logs)
+		// start replicating log entries
+		for _, ch := range rf.newCommandIndexChs {
+			go func(ch chan int) {
+				ch <- index
+			}(ch)
+		}
+	}
 
-
-	return index, term, isLeader
+	return len(rf.logs), rf.currentTerm, rf.currentRole == LeaderRole
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -216,18 +337,359 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) ticker() {
-	for rf.killed() == false {
+//func (rf *Raft) ticker() {
+//	for rf.killed() == false {
+//
+//		// Your code here (2A)
+//		// Check if a leader election should be started.
+//
+//
+//		// pause for a random amount of time between 50 and 350
+//		// milliseconds.
+//		ms := 50 + (rand.Int63() % 300)
+//		time.Sleep(time.Duration(ms) * time.Millisecond)
+//	}
+//}
 
-		// Your code here (2A)
-		// Check if a leader election should be started.
+func (rf *Raft) runAsFollower() {
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "enter runAsFollower")
+	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "exit runAsFollower")
 
+	go func() {
+		startElectionTimerUnlocker := rf.lock(FollowerFlow)
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "start election timer")
+		startElectionTimerUnlocker.unlock(FollowerFlow)
 
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		for !rf.killed() {
+			electionTimerUnlocker := rf.lock(FollowerFlow)
+			if rf.currentRole != FollowerRole {
+				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "role changed, exit runAsFollower")
+				electionTimerUnlocker.unlock(FollowerFlow)
+				break
+			}
+
+			electionTimerUnlocker.unlock(FollowerFlow)
+			time.Sleep(newElectionTimeOut())
+
+			electionTimerUnlocker = rf.lock(FollowerFlow)
+			if rf.killed() {
+				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "killed, exit runAsFollower")
+				electionTimerUnlocker.unlock(FollowerFlow)
+				break
+			}
+
+			if rf.currentRole != FollowerRole {
+				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "role changed, exit runAsFollower")
+				electionTimerUnlocker.unlock(FollowerFlow)
+				break
+			}
+
+			if !rf.receivedValidMessage {
+				rf.currentTerm++
+				rf.votedFor = nil
+				rf.currentRole = CandidateRole
+				rf.runAsCandidate()
+				electionTimerUnlocker.unlock(FollowerFlow)
+				break
+			}
+
+			rf.receivedValidMessage = false
+			electionTimerUnlocker.unlock(FollowerFlow)
+		}
+
+		startElectionTimerUnlocker = rf.lock(FollowerFlow)
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "end election timer")
+		startElectionTimerUnlocker.unlock(FollowerFlow)
+	}()
+}
+
+func (rf *Raft) runAsCandidate() {
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "enter runAsCandidate")
+	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "exit runAsCandidate")
+
+	go func() {
+		electionUnlocker := rf.lock(CandidateFlow)
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "start election timer")
+		electionUnlocker.unlock(CandidateFlow)
+
+		for !rf.killed() {
+			electionTimerUnlocker := rf.lock(CandidateFlow)
+			if rf.currentRole != CandidateRole {
+				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "role changed, exit runAsCandidate")
+				electionTimerUnlocker.unlock(CandidateFlow)
+				break
+			}
+
+			electionTimerUnlocker.unlock(CandidateFlow)
+
+			rf.beginElection()
+			time.Sleep(newElectionTimeOut())
+
+			electionTimerUnlocker = rf.lock(CandidateFlow)
+			if rf.killed() {
+				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "killed, exit runAsCandidate")
+				electionTimerUnlocker.unlock(CandidateFlow)
+				break
+			}
+
+			if rf.currentRole != CandidateRole {
+				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "role changed, exit runAsCandidate")
+				electionTimerUnlocker.unlock(CandidateFlow)
+				break
+			}
+
+			rf.currentTerm++
+			rf.votedFor = nil
+			electionTimerUnlocker.unlock(CandidateFlow)
+		}
+
+		electionUnlocker = rf.lock(CandidateFlow)
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "end election timer")
+		electionUnlocker.unlock(CandidateFlow)
+	}()
+}
+
+func (rf *Raft) beginElection() {
+	unlocker := rf.lock(ElectionFlow)
+	defer unlocker.unlock(ElectionFlow)
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "enter beginElection")
+	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "exit beginElection")
+
+	totalServers := len(rf.peers)
+	majorityServers := totalServers/2 + 1
+	currentServerID := rf.serverID
+	lastLogIndex := len(rf.logs)
+	currentTerm := rf.currentTerm
+	lastLogTerm := 0
+	if lastLogIndex > 0 {
+		lastLogTerm = rf.logs[lastLogIndex-1].Term
 	}
+
+	rf.votedFor = &currentServerID
+
+	requestVoteArgs := &RequestVoteArgs{
+		Term:         currentTerm,
+		CandidateID:  currentServerID,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+	}
+
+	totalVotes := 1
+	grantedVotes := 1
+	voteMu := &sync.Mutex{}
+	voteCond := sync.NewCond(voteMu)
+
+	go func() {
+		requestVotesUnlocker := rf.lock(ElectionFlow)
+		Log(currentServerID, rf.currentRole, currentTerm, InfoLevel, ElectionFlow, "begin requesting votes")
+		requestVotesUnlocker.unlock(ElectionFlow)
+
+		for peerServerID := 0; peerServerID < totalServers; peerServerID++ {
+			if peerServerID == currentServerID {
+				continue
+			}
+
+			go func(peerServerID int) {
+				reply := &RequestVoteReply{}
+				succeed := rf.sendRequestVote(peerServerID, requestVoteArgs, reply, ElectionFlow)
+				voteMu.Lock()
+				defer voteMu.Unlock()
+				defer voteCond.Signal()
+				totalVotes++
+
+				peerUnlocker := rf.lock(ElectionFlow)
+				defer peerUnlocker.unlock(ElectionFlow)
+				if !succeed {
+					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "failed to send vote request to %v", peerServerID)
+					return
+				}
+
+				if rf.killed() {
+					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "killed, exit beginElection")
+					return
+				}
+
+				if rf.currentRole != CandidateRole {
+					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "role changed, exit beginElection")
+					return
+				}
+
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.currentRole = FollowerRole
+					rf.votedFor = nil
+					rf.runAsFollower()
+					return
+				}
+
+				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "received vote from %v, granted:%v", peerServerID, reply.VoteGranted)
+				if reply.VoteGranted {
+					grantedVotes++
+				}
+			}(peerServerID)
+		}
+
+		voteMu.Lock()
+		for totalVotes < totalServers && grantedVotes < majorityServers {
+			voteCond.Wait()
+		}
+
+		unlocker = rf.lock(ElectionFlow)
+		defer unlocker.unlock(ElectionFlow)
+		defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "finish requesting votes")
+
+		if rf.killed() {
+			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "killed, exit beginElection")
+			return
+		}
+
+		if rf.currentRole != CandidateRole {
+			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "role changed, exit beginElection")
+			return
+		}
+
+		if grantedVotes >= majorityServers {
+			rf.currentRole = LeaderRole
+			rf.runAsLeader()
+			return
+		}
+	}()
+}
+
+func (rf *Raft) runAsLeader() {
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LeaderFlow, "enter runAsLeader")
+	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LeaderFlow, "exit runAsLeader")
+	go func() {
+		rf.sendHeartbeats()
+	}()
+}
+
+func (rf *Raft) sendHeartbeats() {
+	unlocker := rf.lock(HeartbeatFlow)
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "enter sendHeartbeats")
+	unlocker.unlock(HeartbeatFlow)
+
+	for {
+		sendHeartbeatsUnlocker := rf.lock(HeartbeatFlow)
+		if rf.killed() {
+			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "killed, exit sendHeartbeats")
+			sendHeartbeatsUnlocker.unlock(HeartbeatFlow)
+			break
+		}
+
+		if rf.currentRole != LeaderRole {
+			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "role changed, exit sendHeartbeats")
+			sendHeartbeatsUnlocker.unlock(HeartbeatFlow)
+			break
+		}
+
+		currentTerm := rf.currentTerm
+		leaderID := rf.serverID
+		prevLogIndex := len(rf.logs)
+		prevLogTerm := 0
+		if prevLogIndex > 0 {
+			prevLogTerm = rf.logs[prevLogIndex-1].Term
+		}
+
+		leaderCommitIndex := rf.commitIndex
+		args := &AppendEntriesArgs{
+			Term:              currentTerm,
+			LeaderID:          leaderID,
+			PrevLogIndex:      prevLogIndex,
+			PreLogTerm:        prevLogTerm,
+			LogEntries:        nil,
+			LeaderCommitIndex: leaderCommitIndex,
+		}
+
+		for peerServerID := 0; peerServerID < len(rf.peers); peerServerID++ {
+			if peerServerID == rf.serverID {
+				continue
+			}
+
+			go func(peerServerID int) {
+				peerUnlocker := rf.lock(HeartbeatFlow)
+
+				if rf.killed() {
+					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "killed, exit sendHeartbeat")
+					peerUnlocker.unlock(HeartbeatFlow)
+					return
+				}
+
+				if rf.currentRole != LeaderRole {
+					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "role changed, exit sendHeartbeat")
+					peerUnlocker.unlock(HeartbeatFlow)
+					return
+				}
+
+				peerUnlocker.unlock(HeartbeatFlow)
+
+				reply := &AppendEntriesReply{}
+				succeed := rf.sendAppendEntries(peerServerID, args, reply, HeartbeatFlow)
+
+				peerUnlocker = rf.lock(HeartbeatFlow)
+				defer peerUnlocker.unlock(HeartbeatFlow)
+				if !succeed {
+					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "failed to send heartbeat to %v", peerServerID)
+					return
+				}
+
+				if rf.killed() {
+					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "killed, exit sendHeartbeat")
+					return
+				}
+
+				if rf.currentRole != LeaderRole {
+					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "role changed, exit sendHeartbeat")
+					return
+				}
+
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.votedFor = nil
+					rf.currentRole = FollowerRole
+					rf.runAsFollower()
+					return
+				}
+			}(peerServerID)
+		}
+
+		unlocker.unlock(HeartbeatFlow)
+		time.Sleep(heartBeatInterval)
+	}
+
+	unlocker = rf.lock(HeartbeatFlow)
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "exit sendHeartbeats")
+	unlocker.unlock(HeartbeatFlow)
+}
+
+func (rf *Raft) applyCommittedEntries() {
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CommitFlow, "enter applyCommittedEntries")
+	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CommitFlow, "exit applyCommittedEntries")
+}
+
+type Unlocker struct {
+	lockID uint64
+	rf     *Raft
+}
+
+func (rf *Raft) lock(flow Flow) *Unlocker {
+	rf.mu.Lock()
+	nextLockID := rf.nextLockID
+	rf.nextLockID++
+	LogAndSkipCallers(rf.serverID, rf.currentRole, rf.currentTerm, DebugLevel, flow, 1, "lock(%v)", nextLockID)
+	return &Unlocker{
+		lockID: nextLockID,
+		rf:     rf,
+	}
+}
+
+func (u *Unlocker) unlock(flow Flow) {
+	LogAndSkipCallers(u.rf.serverID, u.rf.currentRole, u.rf.currentTerm, DebugLevel, flow, 1, "unlock(%v)", u.lockID)
+	u.rf.mu.Unlock()
+}
+
+func newElectionTimeOut() time.Duration {
+	return electionBaseTimeOut + time.Duration(rand.Intn(electionRandomTimeOutFactor))*electionRandomTimeOutMultiplier
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -239,21 +701,30 @@ func (rf *Raft) ticker() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
+func Make(
+	peers []*labrpc.ClientEnd,
+	me int,
+	persister *Persister,
+	applyCh chan ApplyMsg,
+) *Raft {
+	rf := &Raft{
+		peers:       peers,
+		persister:   persister,
+		serverID:    me,
+		currentTerm: 0,
+		commitIndex: 0,
+		lastApplied: 0,
+		nextIndex:   make([]int, len(peers)),
+		matchIndex:  make([]int, len(peers)),
+		currentRole: FollowerRole,
+	}
 
 	// Your initialization code here (2A, 2B, 2C).
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	rf.applyCommittedEntries()
+	rf.runAsFollower()
 	// start ticker goroutine to start elections
-	go rf.ticker()
-
-
+	//go rf.ticker()
 	return rf
 }
