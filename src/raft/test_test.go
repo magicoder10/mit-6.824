@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -505,10 +507,12 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
+	//fmt.Println("111111111111111111")
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
+	//fmt.Println("222222222222222222")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -520,10 +524,12 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
 
+	//fmt.Println("333333333333333333")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
+	//fmt.Println("444444444444444444")
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
@@ -533,10 +539,12 @@ func TestBackup2B(t *testing.T) {
 	}
 	cfg.disconnect(other)
 
+	//fmt.Println("55555555555555555555")
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
+	//fmt.Println("66666666666666666666")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -548,16 +556,21 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
 
+	//fmt.Println("77777777777777777777")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
+	//fmt.Println("88888888888888888888")
 
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
+
+	//fmt.Println("99999999999999999999")
 	cfg.one(rand.Int(), servers, true)
+	//fmt.Println("AAAAAAAAAAAAAAAAAAAA")
 
 	cfg.end()
 }

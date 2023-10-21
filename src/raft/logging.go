@@ -22,6 +22,7 @@ const (
 	LogReplicationFlow Flow = "LogReplication"
 	CommitFlow         Flow = "Commit"
 	StateFlow          Flow = "State"
+	TerminationFlow    Flow = "Termination"
 	ApplyEntryFlow     Flow = "ApplyEntry"
 	SnapshotFlow       Flow = "Snapshot"
 )
@@ -44,7 +45,21 @@ var logLevelRank = map[LogLevel]int{
 	FatalLevel: 4,
 }
 
-const visibleLogLevel LogLevel = DebugLevel
+const visibleLogLevel LogLevel = InfoLevel
+
+var visibleFlows = map[Flow]bool{
+	FollowerFlow:       true,
+	CandidateFlow:      true,
+	LeaderFlow:         true,
+	HeartbeatFlow:      true,
+	ElectionFlow:       true,
+	LogReplicationFlow: true,
+	CommitFlow:         true,
+	StateFlow:          true,
+	TerminationFlow:    true,
+	ApplyEntryFlow:     true,
+	SnapshotFlow:       true,
+}
 
 func Log(serverID int, role Role, term int, level LogLevel, flow Flow, format string, objs ...interface{}) {
 	LogAndSkipCallers(serverID, role, term, level, flow, 1, format, objs...)
@@ -52,6 +67,11 @@ func Log(serverID int, role Role, term int, level LogLevel, flow Flow, format st
 
 func LogAndSkipCallers(serverID int, role Role, term int, level LogLevel, flow Flow, skipCallers int, format string, objs ...interface{}) {
 	if logLevelRank[level] < logLevelRank[visibleLogLevel] {
+		return
+	}
+
+	_, ok := visibleFlows[flow]
+	if !ok {
 		return
 	}
 
