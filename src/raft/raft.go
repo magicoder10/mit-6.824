@@ -181,7 +181,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "reject vote request from %v because of lower term", args.CandidateID)
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "reject stale vote request from %v", args.CandidateID)
 		reply.VoteGranted = false
 		return
 	}
@@ -204,7 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if args.LastLogTerm < lastLogTerm {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "reject vote request from %v because of lower lastLogTerm", args.CandidateID)
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "reject stale vote request from %v", args.CandidateID)
 		reply.VoteGranted = false
 		return
 	}
@@ -238,7 +238,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "reject AppendEntries from %v because of lower term", args.LeaderID)
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "reject stale AppendEntries from %v", args.LeaderID)
 		reply.Success = false
 		return
 	}
