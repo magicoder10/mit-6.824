@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"sync"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 	"6.5840/labrpc"
 )
 
-const heartBeatInterval = 100 * time.Millisecond
+const heartBeatInterval = 150 * time.Millisecond
 const electionBaseTimeOut = 400 * time.Millisecond
 const electionRandomTimeOutFactor = 7
 const electionRandomTimeOutMultiplier = 20 * time.Millisecond
@@ -44,6 +45,8 @@ const (
 	LeaderRole    Role = "Leader"
 	CandidateRole Role = "Candidate"
 	FollowerRole  Role = "Follower"
+
+	ServerRole Role = "Server"
 )
 
 type LogEntry struct {
@@ -56,28 +59,8 @@ func (l LogEntry) String() string {
 	return fmt.Sprintf("[LogEntry Command:%v, Index:%v, Term:%v]", l.Command, l.Index, l.Term)
 }
 
-type Unlocker struct {
-	lockID uint64
-	rf     *Raft
-}
-
-func (rf *Raft) lock(flow Flow) *Unlocker {
-	rf.mu.Lock()
-	nextLockID := rf.nextLockID
-	rf.nextLockID++
-	LogAndSkipCallers(rf.serverID, rf.currentRole, rf.currentTerm, DebugLevel, flow, 1, "lock(%v)", nextLockID)
-	return &Unlocker{
-		lockID: nextLockID,
-		rf:     rf,
-	}
-}
-
-func (u *Unlocker) unlock(flow Flow) {
-	LogAndSkipCallers(u.rf.serverID, u.rf.currentRole, u.rf.currentTerm, DebugLevel, flow, 1, "unlock(%v)", u.lockID)
-	u.rf.mu.Unlock()
-}
-
 type RequestVoteArgs struct {
+	MessageID    uint64
 	Term         int
 	CandidateID  int
 	LastLogIndex int
@@ -90,6 +73,7 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
+	MessageID         uint64
 	Term              int
 	LeaderID          int
 	PrevLogIndex      int
@@ -98,29 +82,13 @@ type AppendEntriesArgs struct {
 	LeaderCommitIndex int
 }
 
-func (a AppendEntriesArgs) String() string {
-	return fmt.Sprintf("[AppendEntriesArgs Term:%v, LeaderID:%v, PrevLogIndex:%v, PreLogTerm:%v, LogEntries:%v, LeaderCommitIndex:%v]",
-		a.Term,
-		a.LeaderID,
-		a.PrevLogIndex,
-		a.PreLogTerm,
-		a.LogEntries,
-		a.LeaderCommitIndex)
-}
-
 type AppendEntriesReply struct {
-	Term          int
-	Success       bool
-	ConflictTerm  int
-	ConflictIndex int
-}
-
-func (a AppendEntriesReply) String() string {
-	return fmt.Sprintf("[AppendEntriesReply Term:%v, Success:%v, ConflictTerm:%v, ConflictIndex:%v]",
-		a.Term,
-		a.Success,
-		a.ConflictTerm,
-		a.ConflictIndex)
+	Term                 int
+	Success              bool
+	HasPrevLogConflict   bool
+	ConflictTerm         *int
+	ConflictIndex        int
+	ConflictLogLastIndex int
 }
 
 // A Go object implementing a single Raft peer.
@@ -132,7 +100,7 @@ type Raft struct {
 	// persistent state on all servers
 	currentTerm int
 	votedFor    *int
-	log         []LogEntry
+	logEntries  []LogEntry
 
 	// volatile state on all servers
 	serverID             int // this peer's index into peers[]
@@ -145,16 +113,19 @@ type Raft struct {
 	nextIndices  []int
 	matchIndices []int
 
-	dead                  bool
 	applyCh               chan ApplyMsg
-	cancelCh              chan struct{}
 	onNewCommandIndexChs  []chan int
 	onMatchIndexChangeCh  chan int
 	onCommitIndexChangeCh chan int
-	sendWaitGroup         *sync.WaitGroup
 
-	nextLockID    uint64
-	nextRequestID uint64
+	locks map[uint64]struct{}
+
+	roleCancelContext   *CancelContext
+	serverCancelContext *CancelContext
+
+	nextLockID          uint64
+	nextMessageID       uint64
+	nextCancelContextID uint64
 }
 
 // return currentTerm and whether this server
@@ -178,51 +149,84 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	unlocker := rf.lock(ElectionFlow)
 	defer unlocker.unlock(ElectionFlow)
 
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "enter RequestVote")
-	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "exit RequestVote")
-
+	LogMessage(
+		rf.messageContext(ElectionFlow, args.CandidateID, rf.serverID, args.MessageID),
+		InfoLevel,
+		"enter RequestVote: %+v",
+		args)
+	defer LogMessage(
+		rf.messageContext(ElectionFlow, args.CandidateID, rf.serverID, args.MessageID),
+		InfoLevel,
+		"exit RequestVote: %+v", reply)
 	reply.Term = rf.currentTerm
+	if rf.serverCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+		reply.VoteGranted = false
+		return
+	}
+
 	if args.Term < rf.currentTerm {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "reject stale vote request from %v", args.CandidateID)
+		LogMessage(
+			rf.messageContext(ElectionFlow, args.CandidateID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"reject stale vote request")
 		reply.VoteGranted = false
 		return
 	}
 
 	if args.Term > rf.currentTerm {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "update current term to %v", args.Term)
+		LogMessage(
+			rf.messageContext(ElectionFlow, args.CandidateID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"update current term to %v",
+			args.Term)
 		rf.currentTerm = args.Term
+		reply.Term = rf.currentTerm
 		rf.votedFor = nil
 		rf.persist(ElectionFlow)
 
 		if rf.currentRole != FollowerRole {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "role changed to follower")
+			LogMessage(
+				rf.messageContext(ElectionFlow, args.CandidateID, rf.serverID, args.MessageID),
+				InfoLevel,
+				"role changed to follower")
 			rf.currentRole = FollowerRole
 			rf.runAsFollower()
 		}
 	}
 
 	lastLogTerm := 0
-	if len(rf.log) > 0 {
-		lastLogTerm = rf.log[len(rf.log)-1].Term
+	if len(rf.logEntries) > 0 {
+		lastLogTerm = rf.logEntries[len(rf.logEntries)-1].Term
 	}
 
 	if args.LastLogTerm < lastLogTerm {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "reject stale vote request from %v", args.CandidateID)
+		LogMessage(
+			rf.messageContext(ElectionFlow, args.CandidateID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"reject stale vote request from %v",
+			args.CandidateID)
 		reply.VoteGranted = false
 		return
 	}
 
 	if args.LastLogTerm == lastLogTerm {
-		if args.LastLogIndex < rf.toAbsoluteLogIndex(len(rf.log)-1) {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "reject vote request from %v because of lower lastLogIndex", args.CandidateID)
+		if args.LastLogIndex < rf.toAbsoluteLogIndex(len(rf.logEntries)-1) {
+			LogMessage(
+				rf.messageContext(ElectionFlow, args.CandidateID, rf.serverID, args.MessageID),
+				InfoLevel,
+				"reject vote request from %v because of lower lastLogIndex",
+				args.CandidateID)
 			reply.VoteGranted = false
 			return
 		}
 	}
 
 	rf.receivedValidMessage = true
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "received valid message from %v", args.CandidateID)
-
+	LogMessage(
+		rf.messageContext(ElectionFlow, args.CandidateID, rf.serverID, args.MessageID),
+		InfoLevel,
+		"received valid message from %v",
+		args.CandidateID)
 	if rf.votedFor != nil && *rf.votedFor != args.CandidateID {
 		reply.VoteGranted = false
 		return
@@ -237,49 +241,105 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	unlocker := rf.lock(LogReplicationFlow)
 	defer unlocker.unlock(LogReplicationFlow)
 
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "enter AppendEntries: args=%v", args)
-	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "exit AppendEntries=reply=%v", reply)
+	LogMessage(
+		rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+		InfoLevel,
+		"enter AppendEntries: args=%+v",
+		args)
+	defer LogMessage(
+		rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+		InfoLevel,
+		"exit AppendEntries: reply=%+v",
+		reply)
 
 	reply.Term = rf.currentTerm
+	reply.HasPrevLogConflict = false
+	if rf.serverCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+		reply.Success = false
+		return
+	}
+
 	if args.Term < rf.currentTerm {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "reject stale AppendEntries from %v", args.LeaderID)
+		LogMessage(
+			rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"reject stale AppendEntries")
 		reply.Success = false
 		return
 	}
 
 	rf.receivedValidMessage = true
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "received valid message from %v", args.LeaderID)
+	LogMessage(
+		rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+		InfoLevel,
+		"received valid message")
 
 	if args.Term > rf.currentTerm {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "update current term to %v", args.Term)
+		LogMessage(
+			rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"update current term to %v",
+			args.Term)
 		rf.currentTerm = args.Term
+		reply.Term = rf.currentTerm
 		rf.votedFor = nil
 		rf.persist(LogReplicationFlow)
 	}
 
 	if rf.currentRole != FollowerRole {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "role changed to follower")
+		LogMessage(
+			rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"role changed to follower")
 		rf.currentRole = FollowerRole
 		rf.runAsFollower()
-		return
 	}
 
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "before appendEntries from %v: commitIndex=%v, log=%v", args.LeaderID, rf.commitIndex, rf.log)
-	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "after appendEntries from %v: commitIndex=%v, log=%v", args.LeaderID, rf.commitIndex, rf.log)
+	LogMessage(
+		rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+		InfoLevel,
+		"before appendEntries from %v: commitIndex=%v, log=%v",
+		args.LeaderID,
+		rf.commitIndex,
+		rf.logEntries)
+	defer LogMessage(
+		rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+		InfoLevel,
+		"after appendEntries from %v: commitIndex=%v, log=%v",
+		args.LeaderID,
+		rf.commitIndex,
+		rf.logEntries)
 
 	relativePrevLogIndex := rf.toRelativeLogIndex(args.PrevLogIndex)
-	if relativePrevLogIndex > len(rf.log)-1 {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "prevLogIndex not found, reject AppendEntries from %v", args.LeaderID)
+	if relativePrevLogIndex > rf.toRelativeLogIndex(len(rf.logEntries)) {
 		reply.Success = false
-		// TODO: implement nextIndex backoff optimization
+		reply.HasPrevLogConflict = true
+		reply.ConflictLogLastIndex = rf.toAbsoluteLogIndex(len(rf.logEntries))
+		LogMessage(
+			rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"prevLogIndex not found, reject AppendEntries: %+v",
+			reply)
 		return
 	}
 
 	if relativePrevLogIndex >= 0 {
-		if args.PreLogTerm != rf.log[relativePrevLogIndex].Term {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "prevLogTerm not match, reject AppendEntries from %v", args.LeaderID)
+		if args.PreLogTerm != rf.logEntries[relativePrevLogIndex].Term {
 			reply.Success = false
-			// TODO: implement nextIndex backoff optimization
+			reply.HasPrevLogConflict = true
+			conflictTerm := rf.logEntries[relativePrevLogIndex].Term
+			reply.ConflictTerm = &conflictTerm
+			for index := 0; index < len(rf.logEntries); index++ {
+				if rf.logEntries[index].Term == conflictTerm {
+					reply.ConflictIndex = rf.toAbsoluteLogIndex(index)
+					break
+				}
+			}
+
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+				InfoLevel,
+				"prevLogTerm not match, reject AppendEntries: %+v", reply)
 			return
 		}
 	}
@@ -288,26 +348,42 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	remainNewEntries := make([]LogEntry, 0)
 	for index, logEntry := range args.LogEntries {
 		originalIndex := relativePrevLogIndex + index + 1
-		if originalIndex >= len(rf.log) {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "prepare to append new entries from %v: %v", args.LeaderID, args.LogEntries[index:])
+		if originalIndex >= len(rf.logEntries) {
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+				InfoLevel,
+				"prepare to append new entries: %v",
+				args.LogEntries[index:])
 			remainNewEntries = args.LogEntries[index:]
 			break
 		}
 
-		if rf.log[originalIndex].Term != logEntry.Term {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "truncate log entries from %v: %v", args.LeaderID, rf.log[originalIndex:])
-			rf.log = rf.log[:originalIndex]
+		if rf.logEntries[originalIndex].Term != logEntry.Term {
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+				InfoLevel,
+				"truncate log entries: %v",
+				rf.logEntries[originalIndex:])
+			rf.logEntries = rf.logEntries[:originalIndex]
 			rf.persist(LogReplicationFlow)
 
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "prepare to append new entries from %v: %v", args.LeaderID, remainNewEntries)
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+				InfoLevel,
+				"prepare to append new entries: %v",
+				remainNewEntries)
 			remainNewEntries = args.LogEntries[index:]
 			break
 		}
 	}
 
 	if len(remainNewEntries) > 0 {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "append new entries from %v: %v", args.LeaderID, remainNewEntries)
-		rf.log = append(rf.log, remainNewEntries...)
+		LogMessage(
+			rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"append new entries: %v",
+			remainNewEntries)
+		rf.logEntries = append(rf.logEntries, remainNewEntries...)
 		rf.persist(LogReplicationFlow)
 	}
 
@@ -318,19 +394,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		newCommitIndex := min(args.LeaderCommitIndex, args.PrevLogIndex+len(args.LogEntries))
 		if newCommitIndex > rf.commitIndex {
 			rf.commitIndex = newCommitIndex
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "update commitIndex to %v", rf.commitIndex)
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+				InfoLevel,
+				"update commitIndex to %v",
+				rf.commitIndex)
 
-			rf.sendWaitGroup.Add(1)
+			finisher := rf.serverCancelContext.Add(rf.logContext(LogReplicationFlow), 1)
 			go func() {
-				defer rf.sendWaitGroup.Done()
+				logUnlocker := rf.lock(LogReplicationFlow)
+				logContext := rf.logContext(LogReplicationFlow)
+				logUnlocker.unlock(LogReplicationFlow)
+
+				defer finisher.Done(logContext)
 				select {
 				case rf.onCommitIndexChangeCh <- newCommitIndex:
-				case <-rf.cancelCh:
+				case <-rf.serverCancelContext.OnCancel(logContext):
+					logUnlocker = rf.lock(LogReplicationFlow)
+					LogMessage(
+						rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+						InfoLevel,
+						"server canceled, exit AppendEntries")
+					logUnlocker.unlock(LogReplicationFlow)
 				}
 			}()
 		}
 	} else {
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "no change to commitIndex")
+		LogMessage(
+			rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
+			InfoLevel,
+			"no change to commitIndex")
 	}
 }
 
@@ -347,37 +440,49 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	fmt.Printf("Start(%v)\n", command)
 	unlocker := rf.lock(LogReplicationFlow)
 	defer unlocker.unlock(LogReplicationFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "enter Start")
-	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "exit Start")
+	Log(rf.logContext(LogReplicationFlow), InfoLevel, "Start(%v)", command)
 
-	if !rf.dead && rf.currentRole == LeaderRole {
-		nextIndex := len(rf.log)
-		logEntry := append(rf.log, LogEntry{
+	Log(rf.logContext(LogReplicationFlow), InfoLevel, "enter Start")
+	defer Log(rf.logContext(LogReplicationFlow), InfoLevel, "exit Start")
+
+	if !rf.serverCancelContext.IsCanceled(rf.logContext(LogReplicationFlow)) && rf.currentRole == LeaderRole {
+		roleCancelContext := rf.roleCancelContext
+		nextIndex := len(rf.logEntries)
+		logEntry := append(rf.logEntries, LogEntry{
 			Command: command,
 			Index:   nextIndex + 1,
 			Term:    rf.currentTerm,
 		})
-		rf.log = logEntry
+		rf.logEntries = logEntry
 		rf.persist(LogReplicationFlow)
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "append new log entry: %v", logEntry)
+		Log(rf.logContext(LogReplicationFlow), InfoLevel, "append new log entry: %v", logEntry)
 
 		// start replicating log entries
 		for _, ch := range rf.onNewCommandIndexChs {
-			rf.sendWaitGroup.Add(1)
+			finisher := roleCancelContext.Add(rf.logContext(LogReplicationFlow), 1)
+			serverFinisher := rf.serverCancelContext.Add(rf.logContext(LogReplicationFlow), 1)
 			go func(ch chan int) {
-				defer rf.sendWaitGroup.Done()
+				logUnlocker := rf.lock(LogReplicationFlow)
+				logContext := rf.logContext(LogReplicationFlow)
+				logUnlocker.unlock(LogReplicationFlow)
+
+				defer finisher.Done(logContext)
+				defer serverFinisher.Done(logContext)
+
 				select {
 				case ch <- nextIndex + 1:
-				case <-rf.cancelCh:
+				case <-roleCancelContext.OnCancel(logContext):
+					logUnlocker = rf.lock(LogReplicationFlow)
+					Log(rf.logContext(LogReplicationFlow), InfoLevel, "role canceled, exit Start")
+					logUnlocker.unlock(LogReplicationFlow)
 				}
 			}(ch)
 		}
 	}
 
-	return len(rf.log), rf.currentTerm, rf.currentRole == LeaderRole
+	return len(rf.logEntries), rf.currentTerm, rf.currentRole == LeaderRole
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -391,20 +496,25 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	unlocker := rf.lock(TerminationFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "Kill enter")
-	rf.dead = true
-	close(rf.cancelCh)
+	Log(rf.logContext(TerminationFlow), InfoLevel, "Kill enter")
+
+	if rf.roleCancelContext != nil {
+		rf.roleCancelContext.TryCancel(rf.logContext(TerminationFlow))
+	}
+
+	rf.serverCancelContext.TryCancel(rf.logContext(TerminationFlow))
 	unlocker.unlock(TerminationFlow)
 
-	rf.sendWaitGroup.Wait()
+	//rf.roleCancelContext.Wait(rf.logContext(TerminationFlow))
+	rf.serverCancelContext.Wait(rf.logContext(TerminationFlow))
 
 	unlocker = rf.lock(TerminationFlow)
 	defer unlocker.unlock(TerminationFlow)
 
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "close onCommitIndexChangeCh")
+	Log(rf.logContext(TerminationFlow), InfoLevel, "close onCommitIndexChangeCh")
 	close(rf.onCommitIndexChangeCh)
 
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "close onMatchIndexChangeCh")
+	Log(rf.logContext(TerminationFlow), InfoLevel, "close onMatchIndexChangeCh")
 	close(rf.onMatchIndexChangeCh)
 
 	for peerServerID, ch := range rf.onNewCommandIndexChs {
@@ -412,58 +522,64 @@ func (rf *Raft) Kill() {
 			continue
 		}
 
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "close onNewCommandIndexCh %v", peerServerID)
+		Log(rf.logContext(TerminationFlow), InfoLevel, "close onNewCommandIndexCh %v", peerServerID)
 		close(ch)
 	}
 
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "Kill exit")
+	Log(rf.logContext(TerminationFlow), InfoLevel, "Kill exit")
 }
 
 func (rf *Raft) runAsFollower() {
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "enter runAsFollower")
-	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "exit runAsFollower")
+	Log(rf.logContext(FollowerFlow), InfoLevel, "enter runAsFollower")
+	defer Log(rf.logContext(FollowerFlow), InfoLevel, "exit runAsFollower")
 
+	prevRoleCancelContext := rf.roleCancelContext
+	newRoleCancelContext := newCancelContext(rf.nextCancelContextID, string(FollowerRole))
+	rf.nextCancelContextID++
+	rf.roleCancelContext = newRoleCancelContext
+	if prevRoleCancelContext != nil {
+		prevRoleCancelContext.TryCancel(rf.logContext(FollowerFlow))
+	}
+
+	finisher := newRoleCancelContext.Add(rf.logContext(FollowerFlow), 1)
 	go func() {
-		startElectionTimerUnlocker := rf.lock(FollowerFlow)
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "start election timer")
-		startElectionTimerUnlocker.unlock(FollowerFlow)
+		logUnlocker := rf.lock(FollowerFlow)
+		defer finisher.Done(rf.logContext(FollowerFlow))
+		logUnlocker.unlock(FollowerFlow)
 
 		for {
 			electionTimerUnlocker := rf.lock(FollowerFlow)
-			if rf.dead {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "killed, exit runAsFollower")
+			if newRoleCancelContext.IsCanceled(rf.logContext(FollowerFlow)) {
+				Log(rf.logContext(FollowerFlow), InfoLevel, "role canceled, exit runAsFollower")
 				electionTimerUnlocker.unlock(FollowerFlow)
-				break
-			}
-
-			if rf.currentRole != FollowerRole {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "role changed, exit runAsFollower")
-				electionTimerUnlocker.unlock(FollowerFlow)
-				break
+				return
 			}
 
 			rf.receivedValidMessage = false
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "begin waiting for election timeout")
+			logContext := rf.logContext(FollowerFlow)
+			Log(logContext, InfoLevel, "begin waiting for election timeout")
 			electionTimerUnlocker.unlock(FollowerFlow)
 
-			time.Sleep(newElectionTimeOut())
-			electionTimerUnlocker = rf.lock(FollowerFlow)
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "end waiting for election timeout")
-
-			if rf.dead {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "killed, exit runAsFollower")
-				electionTimerUnlocker.unlock(FollowerFlow)
-				break
+			select {
+			case <-time.After(newElectionTimeOut()):
+			case <-newRoleCancelContext.OnCancel(logContext):
+				logUnlocker = rf.lock(FollowerFlow)
+				Log(rf.logContext(FollowerFlow), InfoLevel, "role canceled, exit runAsFollower")
+				logUnlocker.unlock(FollowerFlow)
+				return
 			}
 
-			if rf.currentRole != FollowerRole {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "role changed, exit runAsFollower")
+			electionTimerUnlocker = rf.lock(FollowerFlow)
+			Log(rf.logContext(FollowerFlow), InfoLevel, "end waiting for election timeout")
+
+			if newRoleCancelContext.IsCanceled(rf.logContext(FollowerFlow)) {
+				Log(rf.logContext(FollowerFlow), InfoLevel, "role canceled, exit runAsFollower")
 				electionTimerUnlocker.unlock(FollowerFlow)
-				break
+				return
 			}
 
 			if !rf.receivedValidMessage {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "no valid message received")
+				Log(rf.logContext(FollowerFlow), InfoLevel, "no valid message received")
 				rf.currentRole = CandidateRole
 
 				rf.currentTerm++
@@ -471,253 +587,103 @@ func (rf *Raft) runAsFollower() {
 				rf.persist(FollowerFlow)
 
 				rf.runAsCandidate()
+				Log(rf.logContext(FollowerFlow), InfoLevel, "end election timer")
 				electionTimerUnlocker.unlock(FollowerFlow)
-				break
+				return
 			}
 
 			electionTimerUnlocker.unlock(FollowerFlow)
 		}
-
-		endElectionTimerUnlocker := rf.lock(FollowerFlow)
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "end election timer")
-		endElectionTimerUnlocker.unlock(FollowerFlow)
 	}()
 }
 
 func (rf *Raft) runAsCandidate() {
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "enter runAsCandidate")
-	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "exit runAsCandidate")
+	Log(rf.logContext(CandidateFlow), InfoLevel, "enter runAsCandidate")
+	defer Log(rf.logContext(CandidateFlow), InfoLevel, "exit runAsCandidate")
 
+	prevRoleCancelContext := rf.roleCancelContext
+	newRoleCancelContext := newCancelContext(rf.nextCancelContextID, string(CandidateRole))
+	rf.nextCancelContextID++
+	rf.roleCancelContext = newRoleCancelContext
+
+	prevRoleCancelContext.TryCancel(rf.logContext(CandidateFlow))
+	finisher := newRoleCancelContext.Add(rf.logContext(CandidateFlow), 1)
 	go func() {
-		startElectionTimerUnlocker := rf.lock(CandidateFlow)
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "start election timer")
-		startElectionTimerUnlocker.unlock(CandidateFlow)
+		unlocker := rf.lock(CandidateFlow)
+		defer finisher.Done(rf.logContext(CandidateFlow))
+
+		Log(rf.logContext(CandidateFlow), InfoLevel, "start election timer")
+		unlocker.unlock(CandidateFlow)
 
 		for {
 			electionTimerUnlocker := rf.lock(CandidateFlow)
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "start new election timer")
+			Log(rf.logContext(CandidateFlow), InfoLevel, "start new election timer")
 
-			if rf.dead {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "killed, exit runAsCandidate")
+			if newRoleCancelContext.IsCanceled(rf.logContext(CandidateFlow)) {
+				Log(rf.logContext(CandidateFlow), InfoLevel, "role canceled, exit runAsCandidate")
 				electionTimerUnlocker.unlock(CandidateFlow)
-				break
+				return
 			}
 
-			if rf.currentRole != CandidateRole {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "role changed, exit runAsCandidate")
-				electionTimerUnlocker.unlock(CandidateFlow)
-				break
-			}
-
-			electionTerm := rf.currentTerm
+			logContext := rf.logContext(CandidateFlow)
+			electionCancelContext := newCancelContext(rf.nextCancelContextID, string(ElectionFlow))
 			electionTimerUnlocker.unlock(CandidateFlow)
 
-			rf.beginElection(electionTerm)
-			time.Sleep(newElectionTimeOut())
+			finishElectionCh := rf.beginElection(newRoleCancelContext, electionCancelContext)
+			select {
+			case <-time.After(newElectionTimeOut()):
+			case <-newRoleCancelContext.OnCancel(logContext):
+				electionCancelContext.TryCancel(logContext)
+				logUnlocker := rf.lock(CandidateFlow)
+				Log(rf.logContext(CandidateFlow), InfoLevel, "role canceled, exit runAsCandidate")
+				logUnlocker.unlock(CandidateFlow)
+				return
+			case isElectedAsLeader := <-finishElectionCh:
+				if isElectedAsLeader {
+					Log(rf.logContext(CandidateFlow), InfoLevel, "elected as leader, exit runAsCandidate")
+					return
+				}
+			}
 
 			electionTimerUnlocker = rf.lock(CandidateFlow)
-			if rf.dead {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "killed, exit runAsCandidate")
+			if newRoleCancelContext.IsCanceled(rf.logContext(CandidateFlow)) {
+				Log(rf.logContext(CandidateFlow), InfoLevel, "role canceled, exit runAsCandidate")
 				electionTimerUnlocker.unlock(CandidateFlow)
-				break
+				return
 			}
 
-			if rf.currentRole != CandidateRole {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "role changed, exit runAsCandidate")
-				electionTimerUnlocker.unlock(CandidateFlow)
-				break
-			}
-
+			electionCancelContext.TryCancel(logContext)
 			rf.currentTerm++
 			rf.votedFor = nil
 			rf.persist(CandidateFlow)
 
 			electionTimerUnlocker.unlock(CandidateFlow)
 		}
-
-		endElectionTimerUnlocker := rf.lock(CandidateFlow)
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CandidateFlow, "end election timer")
-		endElectionTimerUnlocker.unlock(CandidateFlow)
 	}()
 }
 
 func (rf *Raft) runAsLeader() {
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LeaderFlow, "enter runAsLeader")
-	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LeaderFlow, "exit runAsLeader")
-	for peerServerID := 0; peerServerID < len(rf.peers); peerServerID++ {
-		if peerServerID == rf.serverID {
-			continue
-		}
+	Log(rf.logContext(LeaderFlow), InfoLevel, "enter runAsLeader")
+	defer Log(rf.logContext(LeaderFlow), InfoLevel, "exit runAsLeader")
 
-		rf.nextIndices[peerServerID] = len(rf.log) + 1
-		rf.matchIndices[peerServerID] = 0
-	}
+	prevRoleCancelContext := rf.roleCancelContext
+	newRoleCancelContext := newCancelContext(rf.nextCancelContextID, string(LeaderRole))
+	rf.nextCancelContextID++
+	rf.roleCancelContext = newRoleCancelContext
 
+	prevRoleCancelContext.TryCancel(rf.logContext(LeaderFlow))
+	finisher := newRoleCancelContext.Add(rf.logContext(LeaderFlow), 1)
 	go func() {
-		rf.sendHeartbeats()
-	}()
-	go func() {
-		rf.replicateLogToAllPeers()
-	}()
-	go func() {
-		rf.updateCommitIndex()
-	}()
-}
+		runAsLeaderUnlocker := rf.lock(LeaderFlow)
+		logContext := rf.logContext(LeaderFlow)
+		defer finisher.Done(logContext)
+		runAsLeaderUnlocker.unlock(LeaderFlow)
 
-func (rf *Raft) beginElection(electionTerm int) {
-	unlocker := rf.lock(ElectionFlow)
-	defer unlocker.unlock(ElectionFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "enter beginElection: electionTerm=%v", electionTerm)
-	defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "exit beginElection, electionTerm=%v", electionTerm)
-
-	totalServers := len(rf.peers)
-	majorityServers := totalServers/2 + 1
-	currentServerID := rf.serverID
-	lastLogIndex := len(rf.log)
-	currentTerm := rf.currentTerm
-	lastLogTerm := 0
-	if lastLogIndex > 0 {
-		lastLogTerm = rf.log[lastLogIndex-1].Term
-	}
-
-	rf.votedFor = &currentServerID
-	rf.persist(ElectionFlow)
-
-	requestVoteArgs := &RequestVoteArgs{
-		Term:         currentTerm,
-		CandidateID:  currentServerID,
-		LastLogIndex: lastLogIndex,
-		LastLogTerm:  lastLogTerm,
-	}
-
-	totalVotes := 1
-	grantedVotes := 1
-	voteMu := &sync.Mutex{}
-	voteCond := sync.NewCond(voteMu)
-
-	go func() {
-		requestVotesUnlocker := rf.lock(ElectionFlow)
-		Log(currentServerID, rf.currentRole, currentTerm, InfoLevel, ElectionFlow, "begin requesting votes")
-		requestVotesUnlocker.unlock(ElectionFlow)
-
-		for peerServerID := 0; peerServerID < totalServers; peerServerID++ {
-			if peerServerID == currentServerID {
-				continue
-			}
-
-			go func(peerServerID int) {
-				reply := &RequestVoteReply{}
-				succeed := rf.sendRequestVote(peerServerID, requestVoteArgs, reply, ElectionFlow)
-				voteMu.Lock()
-				defer voteMu.Unlock()
-				defer voteCond.Signal()
-				totalVotes++
-
-				peerUnlocker := rf.lock(ElectionFlow)
-				defer peerUnlocker.unlock(ElectionFlow)
-				if !succeed {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "failed to send vote request to %v", peerServerID)
-					return
-				}
-
-				if rf.dead {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "killed, exit beginElection")
-					return
-				}
-
-				if rf.currentRole != CandidateRole {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "role changed, exit beginElection")
-					return
-				}
-
-				if rf.currentTerm != electionTerm {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "term changed, exit beginElection")
-					return
-				}
-
-				if reply.Term > rf.currentTerm {
-					rf.currentRole = FollowerRole
-					rf.currentTerm = reply.Term
-					rf.votedFor = nil
-					rf.persist(ElectionFlow)
-					rf.runAsFollower()
-					return
-				}
-
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "received vote from %v, granted:%v", peerServerID, reply.VoteGranted)
-				if reply.VoteGranted {
-					grantedVotes++
-				}
-			}(peerServerID)
-		}
-
-		voteMu.Lock()
-		for totalVotes < totalServers && grantedVotes < majorityServers {
-			voteCond.Wait()
-		}
-
-		unlocker = rf.lock(ElectionFlow)
-		defer unlocker.unlock(ElectionFlow)
-		defer Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "finish requesting votes")
-
-		if rf.dead {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "killed, exit beginElection")
+		runAsLeaderUnlocker = rf.lock(LeaderFlow)
+		defer runAsLeaderUnlocker.unlock(LeaderFlow)
+		if newRoleCancelContext.IsCanceled(rf.logContext(LeaderFlow)) {
+			Log(rf.logContext(LeaderFlow), InfoLevel, "role canceled, exit runAsLeader")
 			return
-		}
-
-		if rf.currentRole != CandidateRole {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "role changed, exit beginElection")
-			return
-		}
-
-		if rf.currentTerm != electionTerm {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "term changed, exit beginElection")
-			return
-		}
-
-		if grantedVotes >= majorityServers {
-			rf.currentRole = LeaderRole
-			rf.runAsLeader()
-			return
-		}
-	}()
-}
-
-func (rf *Raft) sendHeartbeats() {
-	unlocker := rf.lock(HeartbeatFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "enter sendHeartbeats")
-	unlocker.unlock(HeartbeatFlow)
-
-	for {
-		sendHeartbeatsUnlocker := rf.lock(HeartbeatFlow)
-		if rf.dead {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "killed, exit sendHeartbeats")
-			sendHeartbeatsUnlocker.unlock(HeartbeatFlow)
-			break
-		}
-
-		if rf.currentRole != LeaderRole {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "role changed, exit sendHeartbeats")
-			sendHeartbeatsUnlocker.unlock(HeartbeatFlow)
-			break
-		}
-
-		currentTerm := rf.currentTerm
-		leaderID := rf.serverID
-		prevLogIndex := len(rf.log)
-		prevLogTerm := 0
-		if prevLogIndex > 0 {
-			prevLogTerm = rf.log[prevLogIndex-1].Term
-		}
-
-		leaderCommitIndex := rf.commitIndex
-		args := &AppendEntriesArgs{
-			Term:              currentTerm,
-			LeaderID:          leaderID,
-			PrevLogIndex:      prevLogIndex,
-			PreLogTerm:        prevLogTerm,
-			LogEntries:        nil,
-			LeaderCommitIndex: leaderCommitIndex,
 		}
 
 		for peerServerID := 0; peerServerID < len(rf.peers); peerServerID++ {
@@ -725,21 +691,286 @@ func (rf *Raft) sendHeartbeats() {
 				continue
 			}
 
+			rf.nextIndices[peerServerID] = len(rf.logEntries) + 1
+			rf.matchIndices[peerServerID] = 0
+		}
+
+		sendHeartbeatsFinisher := newRoleCancelContext.Add(rf.logContext(LeaderFlow), 1)
+		go func() {
+			logUnlocker := rf.lock(LeaderFlow)
+			logContextForSendHeartbeats := rf.logContext(LeaderFlow)
+			logUnlocker.unlock(LeaderFlow)
+			defer sendHeartbeatsFinisher.Done(logContextForSendHeartbeats)
+
+			rf.sendHeartbeats(newRoleCancelContext)
+		}()
+
+		replicateLogFinisher := newRoleCancelContext.Add(rf.logContext(LeaderFlow), 1)
+		go func() {
+			logUnlocker := rf.lock(LeaderFlow)
+			logContextForReplicateLog := rf.logContext(LeaderFlow)
+			logUnlocker.unlock(LeaderFlow)
+			defer replicateLogFinisher.Done(logContextForReplicateLog)
+
+			rf.replicateLogToAllPeers(newRoleCancelContext)
+		}()
+
+		updateCommitIndexFinisher := newRoleCancelContext.Add(rf.logContext(LeaderFlow), 1)
+		go func() {
+			logUnlocker := rf.lock(LeaderFlow)
+			logContextForUpdateCommitIndex := rf.logContext(LeaderFlow)
+			logUnlocker.unlock(LeaderFlow)
+			defer updateCommitIndexFinisher.Done(logContextForUpdateCommitIndex)
+
+			rf.updateCommitIndex(newRoleCancelContext)
+		}()
+	}()
+}
+
+func (rf *Raft) beginElection(roleCancelContext *CancelContext, electionCancelContext *CancelContext) chan bool {
+	electionFinish := make(chan bool)
+	unlocker := rf.lock(ElectionFlow)
+	defer unlocker.unlock(ElectionFlow)
+	Log(rf.logContext(ElectionFlow), InfoLevel, "enter beginElection")
+	defer Log(rf.logContext(ElectionFlow), InfoLevel, "exit beginElection")
+
+	totalServers := len(rf.peers)
+	majorityServers := totalServers/2 + 1
+	currentServerID := rf.serverID
+	lastLogIndex := len(rf.logEntries)
+	currentTerm := rf.currentTerm
+	lastLogTerm := 0
+	if lastLogIndex > 0 {
+		lastLogTerm = rf.logEntries[lastLogIndex-1].Term
+	}
+
+	rf.votedFor = &currentServerID
+	rf.persist(ElectionFlow)
+
+	totalVotes := 1
+	grantedVotes := 1
+	voteMu := &sync.Mutex{}
+	voteCond := sync.NewCond(voteMu)
+
+	electionFinisher := roleCancelContext.Add(rf.logContext(ElectionFlow), 1)
+	go func() {
+		requestVotesUnlocker := rf.lock(ElectionFlow)
+		defer electionFinisher.Done(rf.logContext(ElectionFlow))
+		Log(rf.logContext(ElectionFlow), InfoLevel, "begin requesting votes")
+
+		for peerServerID := 0; peerServerID < totalServers; peerServerID++ {
+			if peerServerID == currentServerID {
+				continue
+			}
+
+			requestVoteFinisher := roleCancelContext.Add(rf.logContext(ElectionFlow), 1)
+			go func(peerServerID int) {
+				requestUnlocker := rf.lock(ElectionFlow)
+				defer voteCond.Signal()
+				defer requestVoteFinisher.Done(rf.logContext(ElectionFlow))
+				messageID := rf.nextMessageID
+				requestVoteArgs := &RequestVoteArgs{
+					MessageID:    messageID,
+					Term:         currentTerm,
+					CandidateID:  currentServerID,
+					LastLogIndex: lastLogIndex,
+					LastLogTerm:  lastLogTerm,
+				}
+				requestUnlocker.unlock(ElectionFlow)
+
+				for {
+					unlocker = rf.lock(ElectionFlow)
+					rf.nextMessageID++
+					if roleCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+						Log(rf.logContext(ElectionFlow), InfoLevel, "role canceled, exit requestVote from %v", peerServerID)
+						unlocker.unlock(ElectionFlow)
+						return
+					}
+
+					if electionCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+						Log(rf.logContext(ElectionFlow), InfoLevel, "election canceled, exit requestVote from %v", peerServerID)
+						unlocker.unlock(ElectionFlow)
+						return
+					}
+
+					unlocker.unlock(ElectionFlow)
+
+					reply := &RequestVoteReply{}
+					succeed := rf.sendRequestVote(peerServerID, requestVoteArgs, reply, ElectionFlow)
+					voteMu.Lock()
+					peerUnlocker := rf.lock(ElectionFlow)
+					if roleCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+						LogMessage(
+							rf.messageContext(ElectionFlow, peerServerID, rf.serverID, messageID),
+							InfoLevel,
+							"role canceled, exit requestVote")
+						peerUnlocker.unlock(ElectionFlow)
+						voteMu.Unlock()
+						return
+					}
+
+					if electionCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+						LogMessage(
+							rf.messageContext(ElectionFlow, peerServerID, rf.serverID, messageID),
+							InfoLevel,
+							"election canceled, exit requestVote")
+						peerUnlocker.unlock(ElectionFlow)
+						voteMu.Unlock()
+						return
+					}
+
+					if !succeed {
+						LogMessage(
+							rf.messageContext(ElectionFlow, peerServerID, rf.serverID, messageID),
+							InfoLevel,
+							"failed to send vote request")
+						peerUnlocker.unlock(ElectionFlow)
+						voteMu.Unlock()
+						continue
+					}
+
+					totalVotes++
+					if reply.Term > rf.currentTerm {
+						LogMessage(
+							rf.messageContext(ElectionFlow, peerServerID, rf.serverID, messageID),
+							InfoLevel,
+							"role changed to follower, exit requestVote")
+						rf.currentRole = FollowerRole
+						rf.currentTerm = reply.Term
+						rf.votedFor = nil
+						rf.persist(ElectionFlow)
+						rf.runAsFollower()
+						peerUnlocker.unlock(ElectionFlow)
+						voteMu.Unlock()
+						return
+					}
+
+					LogMessage(
+						rf.messageContext(ElectionFlow, peerServerID, rf.serverID, messageID),
+						InfoLevel,
+						"received vote, granted:%v",
+						reply.VoteGranted)
+					if reply.VoteGranted {
+						grantedVotes++
+					}
+
+					peerUnlocker.unlock(ElectionFlow)
+					voteMu.Unlock()
+					return
+				}
+			}(peerServerID)
+		}
+
+		requestVotesUnlocker.unlock(ElectionFlow)
+
+		voteMu.Lock()
+		for totalVotes < totalServers &&
+			grantedVotes < majorityServers &&
+			totalVotes-grantedVotes < majorityServers {
+			waitVotesUnlocker := rf.lock(ElectionFlow)
+			if roleCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+				Log(rf.logContext(ElectionFlow), InfoLevel, "role canceled, exit beginElection")
+				waitVotesUnlocker.unlock(ElectionFlow)
+				voteMu.Unlock()
+				return
+			}
+
+			if electionCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+				Log(rf.logContext(ElectionFlow), InfoLevel, "election canceled, exit beginElection")
+				waitVotesUnlocker.unlock(ElectionFlow)
+				voteMu.Unlock()
+				return
+			}
+
+			waitVotesUnlocker.unlock(ElectionFlow)
+			voteCond.Wait()
+		}
+
+		voteMu.Unlock()
+
+		unlocker = rf.lock(ElectionFlow)
+		defer Log(rf.logContext(ElectionFlow), InfoLevel, "finish requesting votes")
+
+		if roleCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+			Log(rf.logContext(ElectionFlow), InfoLevel, "role canceled, exit beginElection")
+			unlocker.unlock(ElectionFlow)
+			return
+		}
+
+		if electionCancelContext.IsCanceled(rf.logContext(ElectionFlow)) {
+			Log(rf.logContext(ElectionFlow), InfoLevel, "election canceled, exit beginElection")
+			unlocker.unlock(ElectionFlow)
+			return
+		}
+
+		if grantedVotes >= majorityServers {
+			rf.currentRole = LeaderRole
+			rf.runAsLeader()
+			unlocker.unlock(ElectionFlow)
+			electionFinish <- true
+			return
+		}
+
+		unlocker.unlock(ElectionFlow)
+		electionFinish <- false
+	}()
+	return electionFinish
+}
+
+func (rf *Raft) sendHeartbeats(cancelContext *CancelContext) {
+	unlocker := rf.lock(HeartbeatFlow)
+	Log(rf.logContext(HeartbeatFlow), InfoLevel, "enter sendHeartbeats")
+	unlocker.unlock(HeartbeatFlow)
+
+	for {
+		sendHeartbeatsUnlocker := rf.lock(HeartbeatFlow)
+		if cancelContext.IsCanceled(rf.logContext(HeartbeatFlow)) {
+			Log(rf.logContext(HeartbeatFlow), InfoLevel, "canceled, exit sendHeartbeats")
+			sendHeartbeatsUnlocker.unlock(HeartbeatFlow)
+			return
+		}
+
+		currentTerm := rf.currentTerm
+		leaderID := rf.serverID
+		prevLogIndex := len(rf.logEntries)
+		prevLogTerm := 0
+		if prevLogIndex > 0 {
+			prevLogTerm = rf.logEntries[prevLogIndex-1].Term
+		}
+
+		leaderCommitIndex := rf.commitIndex
+		for peerServerID := 0; peerServerID < len(rf.peers); peerServerID++ {
+			if peerServerID == rf.serverID {
+				continue
+			}
+
+			if cancelContext.IsCanceled(rf.logContext(HeartbeatFlow)) {
+				Log(rf.logContext(HeartbeatFlow), InfoLevel, "canceled, exit sendHeartbeats")
+				sendHeartbeatsUnlocker.unlock(HeartbeatFlow)
+				return
+			}
+
+			sendHeartbeatFinisher := cancelContext.Add(rf.logContext(HeartbeatFlow), 1)
 			go func(peerServerID int) {
 				peerUnlocker := rf.lock(HeartbeatFlow)
+				defer sendHeartbeatFinisher.Done(rf.logContext(HeartbeatFlow))
 
-				if rf.dead {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "killed, exit sendHeartbeat")
+				if cancelContext.IsCanceled(rf.logContext(HeartbeatFlow)) {
+					Log(rf.logContext(HeartbeatFlow), InfoLevel, "canceled, exit sendHeartbeat")
 					peerUnlocker.unlock(HeartbeatFlow)
 					return
 				}
 
-				if rf.currentRole != LeaderRole {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "role changed, exit sendHeartbeat")
-					peerUnlocker.unlock(HeartbeatFlow)
-					return
+				args := &AppendEntriesArgs{
+					MessageID:         rf.nextMessageID,
+					Term:              currentTerm,
+					LeaderID:          leaderID,
+					PrevLogIndex:      prevLogIndex,
+					PreLogTerm:        prevLogTerm,
+					LogEntries:        nil,
+					LeaderCommitIndex: leaderCommitIndex,
 				}
-
+				rf.nextMessageID++
 				peerUnlocker.unlock(HeartbeatFlow)
 
 				reply := &AppendEntriesReply{}
@@ -747,22 +978,25 @@ func (rf *Raft) sendHeartbeats() {
 
 				peerUnlocker = rf.lock(HeartbeatFlow)
 				defer peerUnlocker.unlock(HeartbeatFlow)
-				if rf.dead {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "killed, exit sendHeartbeat")
-					return
-				}
-
-				if rf.currentRole != LeaderRole {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "role changed, exit sendHeartbeat")
+				if cancelContext.IsCanceled(rf.logContext(HeartbeatFlow)) {
+					LogMessage(
+						rf.messageContext(HeartbeatFlow, peerServerID, rf.serverID, args.MessageID),
+						InfoLevel,
+						"canceled, exit sendHeartbeat")
 					return
 				}
 
 				if !succeed {
-					Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "failed to send heartbeat to %v", peerServerID)
+					LogMessage(rf.messageContext(HeartbeatFlow, peerServerID, rf.serverID, args.MessageID),
+						InfoLevel,
+						"failed to send heartbeat")
 					return
 				}
 
 				if reply.Term > rf.currentTerm {
+					LogMessage(
+						rf.messageContext(HeartbeatFlow, peerServerID, rf.serverID, args.MessageID),
+						InfoLevel, "role changed to follower, exit sendHeartbeat")
 					rf.currentRole = FollowerRole
 					rf.currentTerm = reply.Term
 					rf.votedFor = nil
@@ -773,18 +1007,20 @@ func (rf *Raft) sendHeartbeats() {
 			}(peerServerID)
 		}
 
+		logContext := rf.logContext(HeartbeatFlow)
 		sendHeartbeatsUnlocker.unlock(HeartbeatFlow)
-		time.Sleep(heartBeatInterval)
-	}
 
-	unlocker = rf.lock(HeartbeatFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, HeartbeatFlow, "exit sendHeartbeats")
-	unlocker.unlock(HeartbeatFlow)
+		select {
+		case <-time.After(heartBeatInterval):
+		case <-cancelContext.OnCancel(logContext):
+			Log(rf.logContext(HeartbeatFlow), InfoLevel, "canceled, exit sendHeartbeats")
+		}
+	}
 }
 
-func (rf *Raft) replicateLogToAllPeers() {
+func (rf *Raft) replicateLogToAllPeers(cancelContext *CancelContext) {
 	replicateLogToPeersUnlocker := rf.lock(LogReplicationFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "enter replicateLogToAllPeers")
+	Log(rf.logContext(LogReplicationFlow), InfoLevel, "enter replicateLogToAllPeers")
 	replicateLogToPeersUnlocker.unlock(LogReplicationFlow)
 
 	wg := sync.WaitGroup{}
@@ -794,74 +1030,81 @@ func (rf *Raft) replicateLogToAllPeers() {
 		}
 
 		replicateLogToPeerUnlocker := rf.lock(LogReplicationFlow)
-		if rf.dead {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "killed, exit replicateLogToAllPeers")
+		if cancelContext.IsCanceled(rf.logContext(LogReplicationFlow)) {
+			Log(rf.logContext(LogReplicationFlow), InfoLevel, "canceled, exit replicateLogToAllPeers")
 			replicateLogToPeerUnlocker.unlock(LogReplicationFlow)
-			break
-		}
-
-		if rf.currentRole != LeaderRole {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "role changed, exit replicateLogToAllPeers")
-			replicateLogToPeerUnlocker.unlock(LogReplicationFlow)
-			break
+			return
 		}
 
 		replicateLogToPeerUnlocker.unlock(LogReplicationFlow)
 
+		replicateLogToPeerFinisher := cancelContext.Add(rf.logContext(LogReplicationFlow), 1)
 		wg.Add(1)
 		go func(peerServerID int) {
 			defer wg.Done()
-			rf.replicateLogToOnePeer(peerServerID)
+			logUnlocker := rf.lock(LogReplicationFlow)
+			defer replicateLogToPeerFinisher.Done(rf.logContext(LogReplicationFlow))
+			logUnlocker.unlock(LogReplicationFlow)
+
+			rf.replicateLogToOnePeer(cancelContext, peerServerID)
 		}(peerServerID)
 	}
 
 	wg.Wait()
 
 	replicateLogToPeersUnlocker = rf.lock(LogReplicationFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "exit replicatelogToPeers")
+	Log(rf.logContext(LogReplicationFlow), InfoLevel, "exit replicateLogToPeers")
 	replicateLogToPeersUnlocker.unlock(LogReplicationFlow)
 }
 
-func (rf *Raft) replicateLogToOnePeer(peerServerID int) {
+func (rf *Raft) replicateLogToOnePeer(cancelContext *CancelContext, peerServerID int) {
 	replicateLogToOnePeerUnlocker := rf.lock(LogReplicationFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "enter replicateLogToOnePeer %v", peerServerID)
+	Log(rf.logContext(LogReplicationFlow), InfoLevel, "enter replicateLogToOnePeer %v", peerServerID)
 	onNewCommandIndexCh := rf.onNewCommandIndexChs[peerServerID]
 	replicateLogToOnePeerUnlocker.unlock(LogReplicationFlow)
 
 	for {
 		replicateLogUnlocker := rf.lock(LogReplicationFlow)
-		if rf.dead {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "killed, exit replicateLogToOnePeer")
+		if cancelContext.IsCanceled(rf.logContext(LogReplicationFlow)) {
+			Log(rf.logContext(LogReplicationFlow), InfoLevel, "canceled, exit replicateLogToOnePeer")
 			replicateLogUnlocker.unlock(LogReplicationFlow)
-			break
+			return
 		}
 
-		if rf.currentRole != LeaderRole {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "role changed, exit replicateLogToOnePeer")
-			replicateLogUnlocker.unlock(LogReplicationFlow)
-			break
-		}
-
-		lastEntryIndex := len(rf.log)
+		lastEntryIndex := len(rf.logEntries)
 		if rf.matchIndices[peerServerID] == lastEntryIndex {
+			logContext := rf.logContext(LogReplicationFlow)
 			replicateLogUnlocker.unlock(LogReplicationFlow)
 
-			commandIndex, ok := <-onNewCommandIndexCh
-			if !ok {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "onNewCommandIndexCh closed, exit replicateLogToOnePeer")
-				break
+			var commandIndex int
+			var ok bool
+			select {
+			case commandIndex, ok = <-onNewCommandIndexCh:
+				replicateLogUnlocker = rf.lock(LogReplicationFlow)
+				logContext = rf.logContext(LogReplicationFlow)
+				replicateLogUnlocker.unlock(LogReplicationFlow)
+
+				if !ok {
+					Log(logContext, InfoLevel, "onNewCommandIndexCh closed, exit replicateLogToOnePeer")
+					return
+				}
+			case <-cancelContext.OnCancel(logContext):
+				replicateLogUnlocker = rf.lock(LogReplicationFlow)
+				Log(rf.logContext(LogReplicationFlow), InfoLevel, "canceled, exit replicateLogToOnePeer")
+				replicateLogUnlocker.unlock(LogReplicationFlow)
+				return
 			}
 
 			replicateLogUnlocker = rf.lock(LogReplicationFlow)
-			if rf.currentRole != LeaderRole {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "role changed, exit replicateLogToOnePeer")
+			if cancelContext.IsCanceled(rf.logContext(LogReplicationFlow)) {
+				Log(rf.logContext(LogReplicationFlow), InfoLevel, "canceled, exit replicateLogToOnePeer")
 				replicateLogUnlocker.unlock(LogReplicationFlow)
-				break
+				return
 			}
 
-			lastEntryIndex = len(rf.log)
+			lastEntryIndex = len(rf.logEntries)
 			if commandIndex < lastEntryIndex {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "command index outdated, skipping: peer:%v, commandIndex=%v, endOfLog=%v",
+				Log(rf.logContext(LogReplicationFlow), InfoLevel, "command index outdated, skipping: peer:%v, commandIndex=%v, endOfLog=%v",
 					peerServerID,
 					commandIndex,
 					lastEntryIndex)
@@ -874,11 +1117,13 @@ func (rf *Raft) replicateLogToOnePeer(peerServerID int) {
 		prevLogIndex := nextIndex - 1
 		prevLogTerm := 0
 		if prevLogIndex > 0 {
-			prevLogTerm = rf.log[rf.toRelativeLogIndex(prevLogIndex)].Term
+			prevLogTerm = rf.logEntries[rf.toRelativeLogIndex(prevLogIndex)].Term
 		}
 
-		logEntries := rf.log[rf.toRelativeLogIndex(nextIndex):]
+		logEntries := rf.logEntries[rf.toRelativeLogIndex(nextIndex):]
+		messageID := rf.nextMessageID
 		args := &AppendEntriesArgs{
+			MessageID:         messageID,
 			Term:              rf.currentTerm,
 			LeaderID:          rf.serverID,
 			PrevLogIndex:      prevLogIndex,
@@ -886,31 +1131,35 @@ func (rf *Raft) replicateLogToOnePeer(peerServerID int) {
 			LogEntries:        logEntries,
 			LeaderCommitIndex: rf.commitIndex,
 		}
+		rf.nextMessageID++
 		replicateLogUnlocker.unlock(LogReplicationFlow)
 		reply := &AppendEntriesReply{}
 		succeed := rf.sendAppendEntries(peerServerID, args, reply, LogReplicationFlow)
 
 		replicateLogUnlocker = rf.lock(LogReplicationFlow)
-		if rf.dead {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "killed, exit replicateLogToOnePeer")
+		if cancelContext.IsCanceled(rf.logContext(LogReplicationFlow)) {
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, peerServerID, rf.serverID, messageID),
+				InfoLevel,
+				"canceled, exit replicateLogToOnePeer")
 			replicateLogUnlocker.unlock(LogReplicationFlow)
-			break
-		}
-
-		if rf.currentRole != LeaderRole {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "role changed, exit replicateLogToOnePeer")
-			replicateLogUnlocker.unlock(LogReplicationFlow)
-			break
+			return
 		}
 
 		if !succeed {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "failed to replicate log to %v", peerServerID)
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, peerServerID, rf.serverID, messageID),
+				InfoLevel,
+				"failed to replicate log")
 			replicateLogUnlocker.unlock(LogReplicationFlow)
 			continue
 		}
 
 		if reply.Term > rf.currentTerm {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "role changed, exit replicateLogToOnePeer")
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, peerServerID, rf.serverID, messageID),
+				InfoLevel,
+				"role changed, exit replicateLogToOnePeer")
 			rf.currentRole = FollowerRole
 			rf.currentTerm = reply.Term
 			rf.votedFor = nil
@@ -924,99 +1173,135 @@ func (rf *Raft) replicateLogToOnePeer(peerServerID int) {
 			rf.nextIndices[peerServerID] = lastEntryIndex + 1
 			rf.matchIndices[peerServerID] = lastEntryIndex
 
-			rf.sendWaitGroup.Add(1)
+			finisher := cancelContext.Add(rf.logContext(LogReplicationFlow), 1)
+			serverFinisher := rf.serverCancelContext.Add(rf.logContext(LogReplicationFlow), 1)
 			go func(lastEntryIndex int) {
-				defer rf.sendWaitGroup.Done()
-				lastEntryUnlocker := rf.lock(LogReplicationFlow)
-				if rf.dead {
-					lastEntryUnlocker.unlock(LogReplicationFlow)
-					return
-				}
-
-				if rf.currentRole != LeaderRole {
-					lastEntryUnlocker.unlock(LogReplicationFlow)
-					return
-				}
-
-				lastEntryUnlocker.unlock(LogReplicationFlow)
+				logUnlocker := rf.lock(LogReplicationFlow)
+				logContext := rf.logContext(LogReplicationFlow)
+				defer serverFinisher.Done(logContext)
+				defer finisher.Done(logContext)
+				logUnlocker.unlock(LogReplicationFlow)
 
 				select {
 				case rf.onMatchIndexChangeCh <- lastEntryIndex:
-				case <-rf.cancelCh:
+				case <-cancelContext.OnCancel(logContext):
+					logUnlocker = rf.lock(LogReplicationFlow)
+					LogMessage(
+						rf.messageContext(LogReplicationFlow, peerServerID, rf.serverID, messageID),
+						InfoLevel,
+						"role canceled, exit replicateLogToOnePeer")
+					logUnlocker.unlock(LogReplicationFlow)
 				}
 			}(lastEntryIndex)
 			replicateLogUnlocker.unlock(LogReplicationFlow)
 			continue
 		}
 
-		// TODO: implement index backoff optimization
-		rf.nextIndices[peerServerID] = max(rf.nextIndices[peerServerID]-1, 1)
+		if !reply.HasPrevLogConflict {
+			LogMessage(
+				rf.messageContext(LogReplicationFlow, peerServerID, rf.serverID, messageID),
+				InfoLevel,
+				"previous log entries matches, retry replicating log to %v",
+				peerServerID)
+			replicateLogUnlocker.unlock(LogReplicationFlow)
+			continue
+		}
+
+		LogMessage(
+			rf.messageContext(LogReplicationFlow, peerServerID, rf.serverID, messageID),
+			InfoLevel,
+			"backing off: %+v",
+			reply)
+		newNextIndex := rf.nextIndices[peerServerID]
+		if reply.ConflictTerm == nil {
+			newNextIndex = reply.ConflictLogLastIndex
+		} else {
+			newNextIndex = reply.ConflictIndex
+			for relativeIndex := rf.toRelativeLogIndex(len(rf.logEntries)); relativeIndex >= 0; relativeIndex-- {
+				if rf.logEntries[relativeIndex].Term == *reply.ConflictTerm {
+					newNextIndex = rf.toAbsoluteLogIndex(relativeIndex)
+					break
+				}
+			}
+		}
+
+		rf.nextIndices[peerServerID] = newNextIndex
 		replicateLogUnlocker.unlock(LogReplicationFlow)
 	}
-
-	replicateLogToOnePeerUnlocker = rf.lock(LogReplicationFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "exit replicateLogToOnePeer %v", peerServerID)
-	replicateLogToOnePeerUnlocker.unlock(LogReplicationFlow)
 }
 
-func (rf *Raft) updateCommitIndex() {
+func (rf *Raft) updateCommitIndex(cancelContext *CancelContext) {
 	updateCommitIndexUnlocker := rf.lock(CommitFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CommitFlow, "enter updateCommitIndex")
+	logContext := rf.logContext(CommitFlow)
+	Log(logContext, InfoLevel, "enter updateCommitIndex")
 	updateCommitIndexUnlocker.unlock(CommitFlow)
 
-	for matchIndex := range rf.onMatchIndexChangeCh {
-		updateIndexUnlocker := rf.lock(CommitFlow)
-		if rf.dead {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CommitFlow, "killed, exit updateCommitIndex")
-			updateIndexUnlocker.unlock(CommitFlow)
+	for {
+		var matchIndex int
+		var ok bool
+		select {
+		case matchIndex, ok = <-rf.onMatchIndexChangeCh:
+			if !ok {
+				logUnlocker := rf.lock(CommitFlow)
+				Log(rf.logContext(CommitFlow), InfoLevel, "onMatchIndexChangeCh closed, exit updateCommitIndex")
+				logUnlocker.unlock(CommitFlow)
+				return
+			}
+		case <-cancelContext.OnCancel(logContext):
+			logUnlocker := rf.lock(CommitFlow)
+			Log(rf.logContext(CommitFlow), InfoLevel, "canceled, exit updateCommitIndex")
+			logUnlocker.unlock(CommitFlow)
 			return
 		}
 
-		if rf.currentRole != LeaderRole {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CommitFlow, "role changed, exit updateCommitIndex")
+		updateIndexUnlocker := rf.lock(CommitFlow)
+		if cancelContext.IsCanceled(rf.logContext(CommitFlow)) {
+			Log(rf.logContext(CommitFlow), InfoLevel, "canceled, exit updateCommitIndex")
 			updateIndexUnlocker.unlock(CommitFlow)
-			return
+			break
 		}
 
 		if matchIndex <= rf.commitIndex {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CommitFlow, "matchIndex:%v <= commitIndex:%v, skip", matchIndex, rf.commitIndex)
+			Log(rf.logContext(CommitFlow), InfoLevel, "matchIndex:%v <= commitIndex:%v, skip", matchIndex, rf.commitIndex)
 			updateIndexUnlocker.unlock(CommitFlow)
 			continue
 		}
 
-		rf.tryUpdateCommitIndex(matchIndex)
+		rf.tryUpdateCommitIndex(cancelContext, matchIndex)
 		updateIndexUnlocker.unlock(CommitFlow)
 	}
 
 	updateCommitIndexUnlocker = rf.lock(CommitFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CommitFlow, "exit applyCommittedEntries")
+	Log(rf.logContext(CommitFlow), InfoLevel, "exit updateCommitIndex")
 	updateCommitIndexUnlocker.unlock(CommitFlow)
 }
 
-func (rf *Raft) tryUpdateCommitIndex(matchIndex int) {
+func (rf *Raft) tryUpdateCommitIndex(cancelContext *CancelContext, matchIndex int) {
 	for index := matchIndex; index > rf.commitIndex; index-- {
-		if rf.log[rf.toRelativeLogIndex(index)].Term != rf.currentTerm {
+		if rf.logEntries[rf.toRelativeLogIndex(index)].Term != rf.currentTerm {
 			// only commit entries from current term
 			continue
 		}
 
 		if rf.isReplicatedToMajority(index) {
 			rf.commitIndex = index
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, CommitFlow, "commitIndex updated to %v", rf.commitIndex)
-			rf.sendWaitGroup.Add(1)
-			go func(index int) {
-				defer rf.sendWaitGroup.Done()
-				commitIndexUnlocker := rf.lock(CommitFlow)
-				if rf.dead {
-					commitIndexUnlocker.unlock(CommitFlow)
-					return
-				}
+			Log(rf.logContext(CommitFlow), InfoLevel, "commitIndex updated to %v", rf.commitIndex)
 
-				commitIndexUnlocker.unlock(CommitFlow)
+			finisher := cancelContext.Add(rf.logContext(CommitFlow), 1)
+			serverFinisher := rf.serverCancelContext.Add(rf.logContext(CommitFlow), 1)
+			go func(index int) {
+				logUnlocker := rf.lock(CommitFlow)
+				logContext := rf.logContext(CommitFlow)
+				defer finisher.Done(logContext)
+				defer serverFinisher.Done(logContext)
+				logUnlocker.unlock(CommitFlow)
 
 				select {
 				case rf.onCommitIndexChangeCh <- index:
-				case <-rf.cancelCh:
+				case <-cancelContext.OnCancel(logContext):
+					logUnlocker = rf.lock(CommitFlow)
+					Log(rf.logContext(CommitFlow), InfoLevel, "role canceled, exit tryUpdateCommitIndex")
+					logUnlocker.unlock(CommitFlow)
 				}
 			}(index)
 			return
@@ -1027,32 +1312,41 @@ func (rf *Raft) tryUpdateCommitIndex(matchIndex int) {
 }
 
 func (rf *Raft) applyCommittedEntries() {
-	defer rf.sendWaitGroup.Done()
 	applyCommittedEntriesUnlocker := rf.lock(ApplyEntryFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ApplyEntryFlow, "enter applyCommittedEntries")
+	Log(rf.logContext(ApplyEntryFlow), InfoLevel, "enter applyCommittedEntries")
 	applyCommittedEntriesUnlocker.unlock(ApplyEntryFlow)
 
 	for {
+		applyUnlocker := rf.lock(ApplyEntryFlow)
+		logContext := rf.logContext(ApplyEntryFlow)
+		applyUnlocker.unlock(ApplyEntryFlow)
+
 		commitIndex := 0
 		var ok bool
 		select {
 		case commitIndex, ok = <-rf.onCommitIndexChangeCh:
 			if !ok {
-				break
+				logUnlocker := rf.lock(ApplyEntryFlow)
+				Log(rf.logContext(ApplyEntryFlow), InfoLevel, "onCommitIndexChangeCh closed, exit applyCommittedEntries")
+				logUnlocker.unlock(ApplyEntryFlow)
+				return
 			}
-		case <-rf.cancelCh:
-			break
+		case <-rf.serverCancelContext.OnCancel(logContext):
+			logUnlocker := rf.lock(ApplyEntryFlow)
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedEntries")
+			logUnlocker.unlock(ApplyEntryFlow)
+			return
 		}
 
-		applyUnlocker := rf.lock(ApplyEntryFlow)
-		if rf.dead {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ApplyEntryFlow, "killed, exit applyCommittedEntries")
+		applyUnlocker = rf.lock(ApplyEntryFlow)
+		if rf.serverCancelContext.IsCanceled(rf.logContext(ApplyEntryFlow)) {
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedEntries")
 			applyUnlocker.unlock(ApplyEntryFlow)
 			return
 		}
 
 		if commitIndex <= rf.lastAppliedIndex {
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ApplyEntryFlow, "commitIndex:%v <= lastAppliedIndex:%v, skip", commitIndex, rf.lastAppliedIndex)
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "commitIndex:%v <= lastAppliedIndex:%v, skip", commitIndex, rf.lastAppliedIndex)
 			applyUnlocker.unlock(ApplyEntryFlow)
 			continue
 		}
@@ -1061,14 +1355,16 @@ func (rf *Raft) applyCommittedEntries() {
 
 		for index := rf.lastAppliedIndex + 1; index <= commitIndex; index++ {
 			applyUnlocker = rf.lock(ApplyEntryFlow)
-			if rf.dead {
-				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ApplyEntryFlow, "killed, exit applyCommittedEntries")
+
+			if rf.serverCancelContext.IsCanceled(rf.logContext(ApplyEntryFlow)) {
+				Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedEntries")
 				applyUnlocker.unlock(ApplyEntryFlow)
 				return
 			}
 
-			logEntry := rf.log[rf.toRelativeLogIndex(index)]
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ApplyEntryFlow, "applying log entry %v: %v", index, logEntry)
+			logEntry := rf.logEntries[rf.toRelativeLogIndex(index)]
+			logContext = rf.logContext(ApplyEntryFlow)
+			Log(logContext, InfoLevel, "applying log entry %v: %v", index, logEntry)
 			applyUnlocker.unlock(ApplyEntryFlow)
 
 			applyMsg := ApplyMsg{
@@ -1079,7 +1375,10 @@ func (rf *Raft) applyCommittedEntries() {
 
 			select {
 			case rf.applyCh <- applyMsg:
-			case <-rf.cancelCh:
+			case <-rf.serverCancelContext.OnCancel(logContext):
+				logUnlocker := rf.lock(ApplyEntryFlow)
+				Log(rf.logContext(ApplyEntryFlow), InfoLevel, "role canceled, exit applyCommittedEntries")
+				logUnlocker.unlock(ApplyEntryFlow)
 				return
 			}
 
@@ -1087,7 +1386,7 @@ func (rf *Raft) applyCommittedEntries() {
 		}
 
 		applyUnlocker = rf.lock(ApplyEntryFlow)
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ApplyEntryFlow, "finish applying log entries: lastAppliedIndex=%v", rf.lastAppliedIndex)
+		Log(rf.logContext(ApplyEntryFlow), InfoLevel, "finish applying log entries: lastAppliedIndex=%v", rf.lastAppliedIndex)
 		applyUnlocker.unlock(ApplyEntryFlow)
 	}
 }
@@ -1130,19 +1429,16 @@ func (rf *Raft) toAbsoluteLogIndex(relativeIndex int) int {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist(flow Flow) {
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "persist enter")
-	serverID := rf.serverID
-	currentRole := rf.currentRole
-
+	Log(rf.logContext(flow), InfoLevel, "persist enter")
 	currentTerm := rf.currentTerm
 	voteFor := rf.votedFor
-	log := rf.log
+	log := rf.logEntries
 
 	buf := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(buf)
 	err := encoder.Encode(currentTerm)
 	if err != nil {
-		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to encode currentTerm: %v", err)
+		Log(rf.logContext(flow), ErrorLevel, "failed to encode currentTerm: %v", err)
 	}
 
 	var votedForPersist int
@@ -1154,30 +1450,27 @@ func (rf *Raft) persist(flow Flow) {
 
 	err = encoder.Encode(votedForPersist)
 	if err != nil {
-		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to encode votedFor: %v", err)
+		Log(rf.logContext(flow), ErrorLevel, "failed to encode votedFor: %v", err)
 	}
 
 	err = encoder.Encode(log)
 	if err != nil {
-		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to encode log: %v", err)
+		Log(rf.logContext(flow), ErrorLevel, "failed to encode log: %v", err)
 	}
 
 	data := buf.Bytes()
 	rf.persister.Save(data, nil)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "persist exit")
+	Log(rf.logContext(flow), InfoLevel, "persist exit")
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte, flow Flow) {
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "readPersist enter")
+	Log(rf.logContext(flow), InfoLevel, "readPersist enter")
 
 	if data == nil || len(data) < 1 { // bootstrap without any state?
-		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "readPersist exit")
+		Log(rf.logContext(flow), InfoLevel, "readPersist exit")
 		return
 	}
-
-	serverID := rf.serverID
-	currentRole := rf.currentRole
 
 	var currentTerm int
 	var votedFor *int
@@ -1186,13 +1479,13 @@ func (rf *Raft) readPersist(data []byte, flow Flow) {
 	decoder := labgob.NewDecoder(buf)
 	err := decoder.Decode(&currentTerm)
 	if err != nil {
-		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to decode currentTerm: %v", err)
+		Log(rf.logContext(flow), ErrorLevel, "failed to decode currentTerm: %v", err)
 	}
 
 	var votedForPersist int
 	err = decoder.Decode(&votedForPersist)
 	if err != nil {
-		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to decode votedFor: %v", err)
+		Log(rf.logContext(flow), ErrorLevel, "failed to decode votedFor: %v", err)
 	}
 
 	if votedForPersist == -1 {
@@ -1203,12 +1496,12 @@ func (rf *Raft) readPersist(data []byte, flow Flow) {
 
 	err = decoder.Decode(&log)
 	if err != nil {
-		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to decode logs: %v", err)
+		Log(rf.logContext(flow), ErrorLevel, "failed to decode logs: %v", err)
 	}
 
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
-	rf.log = log
+	rf.logEntries = log
 }
 
 // The labrpc package simulates a lossy network, in which servers
@@ -1231,18 +1524,81 @@ func (rf *Raft) readPersist(data []byte, flow Flow) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, flow Flow) bool {
 	unlocker := rf.lock(flow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "send RequestVote to %v", server)
+	LogMessage(rf.messageContext(flow, rf.serverID, server, args.MessageID), InfoLevel, "send RequestVote to %v: %+v", server, args)
 	unlocker.unlock(flow)
+
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+
+	unlocker = rf.lock(flow)
+	LogMessage(rf.messageContext(flow, server, rf.serverID, args.MessageID), InfoLevel, "receive RequestVote reply from %v: args=%+v", server, reply)
+	unlocker.unlock(flow)
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, flow Flow) bool {
 	unlocker := rf.lock(flow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "send AppendEntries to %v", server)
+	LogMessage(rf.messageContext(flow, rf.serverID, server, args.MessageID), InfoLevel, "send AppendEntries to %v: args=%+v", server, args)
 	unlocker.unlock(flow)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
+	unlocker = rf.lock(flow)
+	LogMessage(rf.messageContext(flow, server, rf.serverID, args.MessageID), InfoLevel, "receive AppendEntries reply from %v: reply=%+v", server, reply)
+	unlocker.unlock(flow)
 	return ok
+}
+
+func (rf *Raft) logContext(flow Flow) LogContext {
+	return LogContext{
+		ServerID:      rf.serverID,
+		Role:          rf.currentRole,
+		Term:          rf.currentTerm,
+		Flow:          flow,
+		NumGoroutines: runtime.NumGoroutine(),
+	}
+}
+
+func (rf *Raft) messageContext(flow Flow, senderID int, receiverID int, messageID uint64) MessageContext {
+	return MessageContext{
+		LogContext: LogContext{
+			ServerID:      rf.serverID,
+			Role:          rf.currentRole,
+			Term:          rf.currentTerm,
+			Flow:          flow,
+			NumGoroutines: runtime.NumGoroutine(),
+		},
+		SenderID:   senderID,
+		ReceiverID: receiverID,
+		MessageID:  messageID,
+	}
+}
+
+func (rf *Raft) lock(flow Flow) *Unlocker {
+	rf.mu.Lock()
+	nextLockID := rf.nextLockID
+	rf.nextLockID++
+	rf.locks[nextLockID] = struct{}{}
+	LogAndSkipCallers(
+		LogContext{
+			ServerID: rf.serverID,
+			Role:     rf.currentRole,
+			Term:     rf.currentTerm,
+			Flow:     flow,
+		}, DebugLevel, 1, "lock(%v): locks=%v", nextLockID, rf.locks)
+	return &Unlocker{
+		lockID:     nextLockID,
+		unlockFunc: rf.unlock,
+	}
+}
+
+func (rf *Raft) unlock(lockID uint64, flow Flow, skipCallers int) {
+	delete(rf.locks, lockID)
+	LogAndSkipCallers(LogContext{
+		ServerID: rf.serverID,
+		Role:     rf.currentRole,
+		Term:     rf.currentTerm,
+		Flow:     flow,
+	}, DebugLevel, skipCallers+1, "unlock(%v): locks=%v", lockID, rf.locks)
+	rf.mu.Unlock()
 }
 
 func newElectionTimeOut() time.Duration {
@@ -1273,6 +1629,8 @@ func Make(
 		onNewCommandIndexChs[peerServerIndex] = make(chan int)
 	}
 
+	var nextCancelContextId uint64 = 0
+	cancelContext := newCancelContext(nextCancelContextId, string(ServerRole))
 	rf := &Raft{
 		peers:                 peers,
 		persister:             persister,
@@ -1287,14 +1645,22 @@ func Make(
 		onNewCommandIndexChs:  onNewCommandIndexChs,
 		onMatchIndexChangeCh:  make(chan int),
 		onCommitIndexChangeCh: make(chan int),
-		cancelCh:              make(chan struct{}),
-		sendWaitGroup:         &sync.WaitGroup{},
+		serverCancelContext:   cancelContext,
+		nextCancelContextID:   nextCancelContextId,
+		locks:                 make(map[uint64]struct{}),
 	}
 
+	nextCancelContextId++
+
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState(), FollowerFlow)
+	rf.readPersist(persister.ReadRaftState(), SharedFlow)
+	finisher := cancelContext.Add(rf.logContext(SharedFlow), 1)
 	go func() {
-		rf.sendWaitGroup.Add(1)
+		unlocker := rf.lock(SharedFlow)
+		logContext := rf.logContext(SharedFlow)
+		defer finisher.Done(logContext)
+		unlocker.unlock(SharedFlow)
+
 		rf.applyCommittedEntries()
 	}()
 	rf.runAsFollower()

@@ -26,6 +26,8 @@ import (
 	"6.5840/labrpc"
 )
 
+const printDebugLog = true
+
 func randstring(n int) string {
 	b := make([]byte, 2*n)
 	crand.Read(b)
@@ -110,7 +112,10 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 
 // shut down a Raft server but save its persistent state.
 func (cfg *config) crash1(i int) {
-	fmt.Printf("crash1(%d)\n", i)
+	if printDebugLog {
+		fmt.Printf("crash1(%d)\n", i)
+	}
+
 	cfg.disconnect(i)
 	cfg.net.DeleteServer(i) // disable client connections to the server.
 
@@ -275,7 +280,10 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
-	fmt.Printf("start1(%d)\n", i)
+	if printDebugLog {
+		fmt.Printf("start1(%d)\n", i)
+	}
+
 	cfg.crash1(i)
 
 	// a fresh set of outgoing ClientEnd names.
@@ -359,7 +367,9 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	fmt.Printf("connect(%d)\n", i)
+	if printDebugLog {
+		fmt.Printf("connect(%d)\n", i)
+	}
 
 	cfg.connected[i] = true
 
@@ -382,7 +392,9 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	fmt.Printf("disconnect(%d)\n", i)
+	if printDebugLog {
+		fmt.Printf("disconnect(%d)\n", i)
+	}
 
 	cfg.connected[i] = false
 
@@ -429,7 +441,10 @@ func (cfg *config) setlongreordering(longrel bool) {
 //
 // try a few times in case re-elections are needed.
 func (cfg *config) checkOneLeader() int {
-	fmt.Println("checkOneLeader()")
+	if printDebugLog {
+		fmt.Println("checkOneLeader()")
+	}
+
 	for iters := 0; iters < 10; iters++ {
 		ms := 450 + (rand.Int63() % 100)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
@@ -480,6 +495,10 @@ func (cfg *config) checkTerms() int {
 // check that none of the connected servers
 // thinks it is the leader.
 func (cfg *config) checkNoLeader() {
+	if printDebugLog {
+		fmt.Println("checkNoLeader()")
+	}
+
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
 			_, is_leader := cfg.rafts[i].GetState()
@@ -492,7 +511,10 @@ func (cfg *config) checkNoLeader() {
 
 // how many servers think a log entry is committed?
 func (cfg *config) nCommitted(index int) (int, interface{}) {
-	fmt.Printf("nCommitted(%v)\n", index)
+	if printDebugLog {
+		fmt.Printf("nCommitted(%v)\n", index)
+	}
+
 	count := 0
 	var cmd interface{} = nil
 	for i := 0; i < len(cfg.rafts); i++ {
@@ -560,7 +582,10 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
-	fmt.Printf("one(%v)\n", cmd)
+	if printDebugLog {
+		fmt.Printf("one(%v)\n", cmd)
+	}
+
 	t0 := time.Now()
 	starts := 0
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
@@ -628,7 +653,10 @@ func (cfg *config) begin(description string) {
 // print the Passed message,
 // and some performance numbers.
 func (cfg *config) end() {
-	fmt.Println("end")
+	if printDebugLog {
+		fmt.Println("end")
+	}
+
 	cfg.checkTimeout()
 	if cfg.t.Failed() == false {
 		cfg.mu.Lock()
