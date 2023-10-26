@@ -1,11 +1,13 @@
 package raft
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
 	"sync"
 	"time"
 
+	"6.5840/labgob"
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
@@ -190,6 +192,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "update current term to %v", args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = nil
+		rf.persist(ElectionFlow)
 
 		if rf.currentRole != FollowerRole {
 			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, ElectionFlow, "role changed to follower")
@@ -227,6 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.VoteGranted = true
 	rf.votedFor = &args.CandidateID
+	rf.persist(ElectionFlow)
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -250,6 +254,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "update current term to %v", args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = nil
+		rf.persist(LogReplicationFlow)
 	}
 
 	if rf.currentRole != FollowerRole {
@@ -292,6 +297,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.log[originalIndex].Term != logEntry.Term {
 			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "truncate log entries from %v: %v", args.LeaderID, rf.log[originalIndex:])
 			rf.log = rf.log[:originalIndex]
+			rf.persist(LogReplicationFlow)
 
 			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "prepare to append new entries from %v: %v", args.LeaderID, remainNewEntries)
 			remainNewEntries = args.LogEntries[index:]
@@ -302,6 +308,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(remainNewEntries) > 0 {
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "append new entries from %v: %v", args.LeaderID, remainNewEntries)
 		rf.log = append(rf.log, remainNewEntries...)
+		rf.persist(LogReplicationFlow)
 	}
 
 	if args.LeaderCommitIndex > rf.commitIndex {
@@ -354,6 +361,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    rf.currentTerm,
 		})
 		rf.log = logEntry
+		rf.persist(LogReplicationFlow)
 		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "append new log entry: %v", logEntry)
 
 		// start replicating log entries
@@ -383,7 +391,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	unlocker := rf.lock(TerminationFlow)
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "kill enter")
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "Kill enter")
 	rf.dead = true
 	close(rf.cancelCh)
 	unlocker.unlock(TerminationFlow)
@@ -408,7 +416,7 @@ func (rf *Raft) Kill() {
 		close(ch)
 	}
 
-	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "kill exit")
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, TerminationFlow, "Kill exit")
 }
 
 func (rf *Raft) runAsFollower() {
@@ -456,9 +464,12 @@ func (rf *Raft) runAsFollower() {
 
 			if !rf.receivedValidMessage {
 				Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, FollowerFlow, "no valid message received")
+				rf.currentRole = CandidateRole
+
 				rf.currentTerm++
 				rf.votedFor = nil
-				rf.currentRole = CandidateRole
+				rf.persist(FollowerFlow)
+
 				rf.runAsCandidate()
 				electionTimerUnlocker.unlock(FollowerFlow)
 				break
@@ -519,6 +530,8 @@ func (rf *Raft) runAsCandidate() {
 
 			rf.currentTerm++
 			rf.votedFor = nil
+			rf.persist(CandidateFlow)
+
 			electionTimerUnlocker.unlock(CandidateFlow)
 		}
 
@@ -568,6 +581,7 @@ func (rf *Raft) beginElection(electionTerm int) {
 	}
 
 	rf.votedFor = &currentServerID
+	rf.persist(ElectionFlow)
 
 	requestVoteArgs := &RequestVoteArgs{
 		Term:         currentTerm,
@@ -622,9 +636,10 @@ func (rf *Raft) beginElection(electionTerm int) {
 				}
 
 				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
 					rf.currentRole = FollowerRole
+					rf.currentTerm = reply.Term
 					rf.votedFor = nil
+					rf.persist(ElectionFlow)
 					rf.runAsFollower()
 					return
 				}
@@ -748,9 +763,10 @@ func (rf *Raft) sendHeartbeats() {
 				}
 
 				if reply.Term > rf.currentTerm {
+					rf.currentRole = FollowerRole
 					rf.currentTerm = reply.Term
 					rf.votedFor = nil
-					rf.currentRole = FollowerRole
+					rf.persist(HeartbeatFlow)
 					rf.runAsFollower()
 					return
 				}
@@ -894,10 +910,11 @@ func (rf *Raft) replicateLogToOnePeer(peerServerID int) {
 		}
 
 		if reply.Term > rf.currentTerm {
+			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "role changed, exit replicateLogToOnePeer")
+			rf.currentRole = FollowerRole
 			rf.currentTerm = reply.Term
 			rf.votedFor = nil
-			rf.currentRole = FollowerRole
-			Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, LogReplicationFlow, "role changed, exit replicateLogToOnePeer")
+			rf.persist(LogReplicationFlow)
 			rf.runAsFollower()
 			replicateLogUnlocker.unlock(LogReplicationFlow)
 			return
@@ -1112,35 +1129,86 @@ func (rf *Raft) toAbsoluteLogIndex(relativeIndex int) int {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+func (rf *Raft) persist(flow Flow) {
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "persist enter")
+	serverID := rf.serverID
+	currentRole := rf.currentRole
+
+	currentTerm := rf.currentTerm
+	voteFor := rf.votedFor
+	log := rf.log
+
+	buf := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(buf)
+	err := encoder.Encode(currentTerm)
+	if err != nil {
+		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to encode currentTerm: %v", err)
+	}
+
+	var votedForPersist int
+	if voteFor == nil {
+		votedForPersist = -1
+	} else {
+		votedForPersist = *voteFor
+	}
+
+	err = encoder.Encode(votedForPersist)
+	if err != nil {
+		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to encode votedFor: %v", err)
+	}
+
+	err = encoder.Encode(log)
+	if err != nil {
+		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to encode log: %v", err)
+	}
+
+	data := buf.Bytes()
+	rf.persister.Save(data, nil)
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "persist exit")
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, flow Flow) {
+	Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "readPersist enter")
+
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		Log(rf.serverID, rf.currentRole, rf.currentTerm, InfoLevel, flow, "readPersist exit")
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	serverID := rf.serverID
+	currentRole := rf.currentRole
+
+	var currentTerm int
+	var votedFor *int
+	var log []LogEntry
+	buf := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(buf)
+	err := decoder.Decode(&currentTerm)
+	if err != nil {
+		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to decode currentTerm: %v", err)
+	}
+
+	var votedForPersist int
+	err = decoder.Decode(&votedForPersist)
+	if err != nil {
+		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to decode votedFor: %v", err)
+	}
+
+	if votedForPersist == -1 {
+		votedFor = nil
+	} else {
+		votedFor = &votedForPersist
+	}
+
+	err = decoder.Decode(&log)
+	if err != nil {
+		Log(serverID, currentRole, currentTerm, ErrorLevel, flow, "failed to decode logs: %v", err)
+	}
+
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
 }
 
 // The labrpc package simulates a lossy network, in which servers
@@ -1223,9 +1291,8 @@ func Make(
 		sendWaitGroup:         &sync.WaitGroup{},
 	}
 
-	// Your initialization code here (2C).
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), FollowerFlow)
 	go func() {
 		rf.sendWaitGroup.Add(1)
 		rf.applyCommittedEntries()
