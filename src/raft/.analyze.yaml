@@ -1,0 +1,85 @@
+pipelines:
+  server0:
+    - or:
+      - serverID:0
+      - Passed
+      - 'panic: test timed out after'
+  server1:
+    - or:
+      - serverID:1
+      - Passed
+      - 'panic: test timed out after'
+  server2:
+    - or:
+      - serverID:2
+      - Passed
+      - 'panic: test timed out after'
+  server3:
+    - or:
+      - serverID:3
+      - Passed
+      - 'panic: test timed out after'
+  server4:
+    - or:
+      - serverID:4
+      - Passed
+      - 'panic: test timed out after'
+  test:
+    - or:
+      - start[0-9]+\([0-9]+\)
+      - Start\([0-9]+\)
+      - crash[0-9]+\([0-9]+\)
+      - connect\([0-9]+\)
+      - disconnect\([0-9]+\)
+      - one\([0-9]+\)
+      - Passed
+      - 'panic: test timed out after'
+  kill:
+    - or:
+      - Kill enter
+      - Kill exit
+      - flow:Termination
+      - 'panic: test timed out after'
+  cancel-0:
+    - or:
+      - serverID:2
+    - or:
+      - \(id=0
+  cancel-1:
+    - or:
+      - serverID:2
+    - or:
+      - \(id=1
+  cancel-2:
+    - or:
+      - serverID:2
+    - or:
+      - \(id=2
+  cancel-3:
+    - or:
+      - serverID:2
+    - or:
+      - \(id=3
+  cancel-4:
+    - or:
+      - serverID:2
+    - or:
+      - \(id=4
+  cancel-5:
+    - or:
+      - serverID:2
+    - or:
+      - \(id=5
+  cancel-6:
+    - or:
+      - serverID:2
+    - or:
+      - \(id=6
+  raft-748:
+    - or:
+      - \(id=6
+    - or:
+      - task=raft.go:748
+  term-9:
+    - or:
+      - term:9

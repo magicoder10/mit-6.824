@@ -1,0 +1,9 @@
+go run tool/*.go filter -c raft/.analyze.yaml -o raft/logs/analyze/output -e log -i raft/logs/analyze/TestReElection2A_7034.log
+
+rm -rf logs/running && ../dstest --workers 8 --output logs --race --timeout 0s --iter 2000 TestInitialElection2A TestReElection2A TestManyElections2A
+
+rm -rf logs/running && ../dstest --workers 8 --output logs --race --timeout 30s --iter 2000 TestBasicAgree2B TestRPCBytes2B TestFollowerFailure2B TestLeaderFailure2B TestFailAgree2B TestFailNoAgree2B TestConcurrentStarts2B TestRejoin2B TestBackup2B TestCount2B
+
+rm -rf logs/running && ../dstest --workers 8 --output logs --race --timeout 80s --iter 2000 TestPersist12C TestPersist22C TestPersist32C TestFigure82C TestUnreliableAgree2C TestFigure8Unreliable2C
+
+rm -rf logs/running && ../dstest --workers 8 --output logs --race --timeout 80s --iter 5000 TestInitialElection2A TestReElection2A TestManyElections2A TestBasicAgree2B TestRPCBytes2B TestFollowerFailure2B TestLeaderFailure2B TestFailAgree2B TestFailNoAgree2B TestConcurrentStarts2B TestRejoin2B TestBackup2B TestCount2B TestPersist12C TestPersist22C TestPersist32C TestFigure82C TestUnreliableAgree2C TestFigure8Unreliable2C
