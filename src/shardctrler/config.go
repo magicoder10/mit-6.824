@@ -1,17 +1,20 @@
 package shardctrler
 
-import "6.5840/labrpc"
-import "6.5840/raft"
-import "testing"
-import "os"
+import (
+	crand "crypto/rand"
+	"encoding/base64"
+	"math/rand"
+	"os"
+	"runtime"
+	"sync"
+	"testing"
+	"time"
+
+	"mit-6.824/labrpc"
+	"mit-6.824/raft"
+)
 
 // import "log"
-import crand "crypto/rand"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "time"
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)

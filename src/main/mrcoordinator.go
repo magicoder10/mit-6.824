@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"6.5840/mr"
+	"mit-6.824/mr"
 )
 
 func main() {

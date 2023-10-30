@@ -1,4 +1,4 @@
-module 6.5840
+module mit-6.824
 
 go 1.21
 
