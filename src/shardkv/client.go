@@ -13,8 +13,8 @@ import (
 	"math/big"
 	"time"
 
-	"mit-6.824/labrpc"
-	"mit-6.824/shardctrler"
+	"github.com/magicoder10/mit-6.824/labrpc"
+	"github.com/magicoder10/mit-6.824/shardctrler"
 )
 
 // which shard is a key in?

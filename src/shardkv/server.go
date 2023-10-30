@@ -3,9 +3,9 @@ package shardkv
 import (
 	"sync"
 
-	"mit-6.824/labgob"
-	"mit-6.824/labrpc"
-	"mit-6.824/raft"
+	"github.com/magicoder10/mit-6.824/labgob"
+	"github.com/magicoder10/mit-6.824/labrpc"
+	"github.com/magicoder10/mit-6.824/raft"
 )
 
 type Op struct {

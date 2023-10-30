@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"time"
 
-	"mit-6.824/labrpc"
+	"github.com/magicoder10/mit-6.824/labrpc"
 )
 
 type Clerk struct {

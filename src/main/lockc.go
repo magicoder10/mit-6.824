@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	"mit-6.824/lockservice"
+	"github.com/magicoder10/mit-6.824/lockservice"
 )
 
 func usage() {

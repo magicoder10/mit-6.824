@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unicode"
 
-	"mit-6.824/mr"
+	"github.com/magicoder10/mit-6.824/mr"
 )
 
 // The mapping function is called once for each piece of the input.

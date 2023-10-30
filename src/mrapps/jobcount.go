@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"mit-6.824/mr"
+	"github.com/magicoder10/mit-6.824/mr"
 )
 
 var count int
