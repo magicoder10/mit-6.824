@@ -11,6 +11,7 @@ package raft
 import (
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,8 @@ import (
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
+
+const printTestDebugLog = false
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
@@ -275,31 +278,94 @@ func TestFailAgree2B(t *testing.T) {
 
 	cfg.begin("Test (2B): agreement after follower reconnects")
 
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("1", 20))
+	}
+
 	cfg.one(101, servers, false)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("2", 20))
+	}
 
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("3", 20))
+	}
+
 	cfg.disconnect((leader + 1) % servers)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("4", 20))
+	}
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
 	cfg.one(102, servers-1, false)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("5", 20))
+	}
+
 	cfg.one(103, servers-1, false)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("6", 20))
+	}
+
 	time.Sleep(RaftElectionTimeout)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("7", 20))
+	}
+
 	cfg.one(104, servers-1, false)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("8", 20))
+	}
+
 	cfg.one(105, servers-1, false)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("9", 20))
+	}
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("a", 20))
+	}
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
 	// on new commands.
 	cfg.one(106, servers, true)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("b", 20))
+	}
+
 	time.Sleep(RaftElectionTimeout)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("c", 20))
+	}
+
 	cfg.one(107, servers, true)
 
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("d", 20))
+	}
+
 	cfg.end()
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("e", 20))
+	}
 }
 
 func TestFailNoAgree2B(t *testing.T) {
@@ -577,6 +643,10 @@ func TestCount2B(t *testing.T) {
 			n += cfg.rpcCount(j)
 		}
 		return
+	}
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("1", 20))
 	}
 
 	leader := cfg.checkOneLeader()
