@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"mit-6.824/porcupine"
+	"github.com/magicoder10/mit-6.824/porcupine"
 )
 
 type KvInput struct {

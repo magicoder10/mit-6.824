@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"mit-6.824/labgob"
-	//	"mit-6.824/labgob"
-	"mit-6.824/labrpc"
+	"github.com/magicoder10/mit-6.824/labgob"
+	//	"github.com/magicoder10/mit-6.824/labgob"
+	"github.com/magicoder10/mit-6.824/labrpc"
 )
 
 const heartBeatInterval = 120 * time.Millisecond

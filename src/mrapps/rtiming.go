@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"mit-6.824/mr"
+	"github.com/magicoder10/mit-6.824/mr"
 )
 
 func nparallel(phase string) int {

@@ -14,7 +14,7 @@ import (
 	"plugin"
 	"sort"
 
-	"mit-6.824/mr"
+	"github.com/magicoder10/mit-6.824/mr"
 )
 
 // for sorting by key.

@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"os"
 
-	"mit-6.824/pbservice"
+	"github.com/magicoder10/mit-6.824/pbservice"
 )
 
 func usage() {
