@@ -26,7 +26,7 @@ import (
 	"6.5840/labrpc"
 )
 
-const printDebugLog = true
+const printConfigDebugLog = false
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -112,7 +112,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 
 // shut down a Raft server but save its persistent state.
 func (cfg *config) crash1(i int) {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Printf("crash1(%d)\n", i)
 	}
 
@@ -280,7 +280,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Printf("start1(%d)\n", i)
 	}
 
@@ -367,7 +367,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Printf("connect(%d)\n", i)
 	}
 
@@ -392,7 +392,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Printf("disconnect(%d)\n", i)
 	}
 
@@ -441,7 +441,7 @@ func (cfg *config) setlongreordering(longrel bool) {
 //
 // try a few times in case re-elections are needed.
 func (cfg *config) checkOneLeader() int {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Println("checkOneLeader()")
 	}
 
@@ -495,7 +495,7 @@ func (cfg *config) checkTerms() int {
 // check that none of the connected servers
 // thinks it is the leader.
 func (cfg *config) checkNoLeader() {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Println("checkNoLeader()")
 	}
 
@@ -511,7 +511,7 @@ func (cfg *config) checkNoLeader() {
 
 // how many servers think a log entry is committed?
 func (cfg *config) nCommitted(index int) (int, interface{}) {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Printf("nCommitted(%v)\n", index)
 	}
 
@@ -582,7 +582,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Printf("one(%v)\n", cmd)
 	}
 
@@ -653,7 +653,7 @@ func (cfg *config) begin(description string) {
 // print the Passed message,
 // and some performance numbers.
 func (cfg *config) end() {
-	if printDebugLog {
+	if printConfigDebugLog {
 		fmt.Println("end")
 	}
 
