@@ -2,15 +2,63 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
+
+var goroutinesPattern = regexp.MustCompile("goroutines:(\\d+)")
+var runningTasksPattern = regexp.MustCompile("runningTasks=map\\[([a-zA-Z0-9.: ]+)]")
+
+var taskCountPattern = regexp.MustCompile("([a-zA-Z0-9.]+:\\d+):(\\d+)")
+
+var connectPattern = regexp.MustCompile("^connect\\(([0-9]+)\\)")
+var disconnectPattern = regexp.MustCompile("^disconnect\\(([0-9]+)\\)")
+
+type ConnectionState string
+
+const (
+	ConnectedConnectionState    ConnectionState = "Connected"
+	DisconnectedConnectionState ConnectionState = "Disconnected"
+)
+
+type State struct {
+	Network map[int]ConnectionState
+}
+
+type Stats struct {
+	MaxGoroutines int
+	MaxTaskCount  map[string]int
+}
+
+type Goroutines struct {
+	Count int
+}
+
+type RunningTasks struct {
+	TaskCount map[string]int
+}
+
+type TaskCount struct {
+	TaskName string
+	Count    int
+}
+
+type Connect struct {
+	ServerID int
+}
+
+type Disconnect struct {
+	ServerID int
+}
 
 type Analyze struct {
 	Pipelines map[string]Pipeline
@@ -23,6 +71,8 @@ type OrOperator []*regexp.Regexp
 var configFilePath string
 var inputFilePath string
 var outputDir string
+
+var outputFilePath string
 
 var outputFileExt string
 
@@ -39,16 +89,32 @@ var filterCmd = &cobra.Command{
 	},
 }
 
+var statsCmd = &cobra.Command{
+	Use:   "stats",
+	Short: "calculate stats",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return calcStats(inputFilePath, outputFilePath)
+	},
+}
+
+var stateCmd = &cobra.Command{
+	Use:   "state",
+	Short: "calculate state",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return calcState(inputFilePath, outputFilePath)
+	},
+}
+
 func main() {
-	rootCmd.PersistentFlags().StringVarP(&configFilePath, "config", "c", "", "config file path")
-	err := rootCmd.MarkPersistentFlagRequired("config")
+	rootCmd.PersistentFlags().StringVarP(&inputFilePath, "input", "i", "", "input file path")
+	err := rootCmd.MarkPersistentFlagRequired("input")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	filterCmd.PersistentFlags().StringVarP(&inputFilePath, "input", "i", "", "input file path")
-	err = filterCmd.MarkPersistentFlagRequired("input")
+	filterCmd.PersistentFlags().StringVarP(&configFilePath, "config", "c", "", "config file path")
+	err = filterCmd.MarkPersistentFlagRequired("config")
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -67,7 +133,23 @@ func main() {
 		return
 	}
 
+	statsCmd.PersistentFlags().StringVarP(&outputFilePath, "outputFilePath", "o", "", "output file path")
+	err = statsCmd.MarkPersistentFlagRequired("outputFilePath")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	stateCmd.PersistentFlags().StringVarP(&outputFilePath, "outputFilePath", "o", "", "output file path")
+	err = stateCmd.MarkPersistentFlagRequired("outputFilePath")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	rootCmd.AddCommand(filterCmd)
+	rootCmd.AddCommand(statsCmd)
+	rootCmd.AddCommand(stateCmd)
 	err = rootCmd.Execute()
 }
 
@@ -196,4 +278,209 @@ func parseConfig(buf []byte) (Analyze, error) {
 	}
 
 	return analyze, nil
+}
+
+func calcStats(inputFilePath string, outputFilePath string) error {
+	inputFile, err := os.Open(inputFilePath)
+	if err != nil {
+		return err
+	}
+
+	defer inputFile.Close()
+
+	outputFile, err := os.OpenFile(outputFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	defer outputFile.Close()
+
+	stats := Stats{
+		MaxGoroutines: 0,
+		MaxTaskCount:  map[string]int{},
+	}
+	scanner := bufio.NewScanner(inputFile)
+	for scanner.Scan() {
+		line := scanner.Text()
+		includeLine(line, &stats)
+	}
+
+	buf, err := json.MarshalIndent(stats, "", strings.Repeat(" ", 4))
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(outputFile, "%s\n", buf)
+	return err
+}
+
+func includeLine(line string, stats *Stats) {
+	goroutineCounter, match, err := parseGoroutines(line)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	if match {
+		stats.MaxGoroutines = max(goroutineCounter.Count, stats.MaxGoroutines)
+	}
+
+	runningTasks, match, err := parseRunningTasks(line)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	if match {
+		for taskName, count := range runningTasks.TaskCount {
+			if _, ok := stats.MaxTaskCount[taskName]; !ok {
+				stats.MaxTaskCount[taskName] = count
+			} else {
+				stats.MaxTaskCount[taskName] = max(count, stats.MaxTaskCount[taskName])
+			}
+		}
+	}
+}
+
+func parseGoroutines(line string) (Goroutines, bool, error) {
+	groups := goroutinesPattern.FindStringSubmatch(line)
+	if len(groups) != 2 {
+		return Goroutines{}, false, nil
+	}
+
+	count, err := strconv.ParseInt(groups[1], 10, 64)
+	if err != nil {
+		return Goroutines{}, false, err
+	}
+
+	return Goroutines{
+		Count: int(count),
+	}, true, nil
+}
+
+func parseRunningTasks(line string) (RunningTasks, bool, error) {
+	groups := runningTasksPattern.FindStringSubmatch(line)
+	if len(groups) != 2 {
+		return RunningTasks{}, false, nil
+	}
+
+	taskCountMap := map[string]int{}
+	taskCountInputs := strings.Split(groups[1], " ")
+	for _, taskCountInput := range taskCountInputs {
+		taskCount, err := parseTaskCount(taskCountInput)
+		if err != nil {
+			return RunningTasks{}, false, err
+		}
+
+		taskCountMap[taskCount.TaskName] = taskCount.Count
+	}
+
+	return RunningTasks{
+		TaskCount: taskCountMap,
+	}, true, nil
+}
+
+func parseTaskCount(input string) (TaskCount, error) {
+	groups := taskCountPattern.FindStringSubmatch(input)
+	if len(groups) != 3 {
+		return TaskCount{}, fmt.Errorf("invalid input: %s", input)
+	}
+
+	count, err := strconv.ParseInt(groups[2], 10, 64)
+	if err != nil {
+		return TaskCount{}, err
+	}
+
+	return TaskCount{
+		TaskName: groups[1],
+		Count:    int(count),
+	}, nil
+}
+
+func calcState(inputFilePath string, outputFilePath string) error {
+	inputFile, err := os.Open(inputFilePath)
+	if err != nil {
+		return err
+	}
+
+	defer inputFile.Close()
+
+	outputFile, err := os.OpenFile(outputFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	defer outputFile.Close()
+
+	state := State{
+		Network: map[int]ConnectionState{},
+	}
+
+	lineNumber := 1
+	scanner := bufio.NewScanner(inputFile)
+	for scanner.Scan() {
+		line := scanner.Text()
+		isUpdated := updateNetworkState(&state, line)
+		if isUpdated {
+			_, err = fmt.Fprintf(outputFile, "%d  %s state=%+v\n", lineNumber, line, state)
+		}
+
+		lineNumber++
+	}
+
+	return err
+}
+
+func updateNetworkState(state *State, line string) bool {
+	connect, match, err := parseConnect(line)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	if match {
+		state.Network[connect.ServerID] = ConnectedConnectionState
+		return true
+	}
+
+	disconnect, match, err := parseDisconnect(line)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	if match {
+		state.Network[disconnect.ServerID] = DisconnectedConnectionState
+		return true
+	}
+
+	return false
+}
+
+func parseConnect(input string) (Connect, bool, error) {
+	groups := connectPattern.FindStringSubmatch(input)
+	if len(groups) != 2 {
+		return Connect{}, false, nil
+	}
+
+	serverID, err := strconv.ParseInt(groups[1], 10, 64)
+	if err != nil {
+		return Connect{}, false, err
+	}
+
+	return Connect{
+		ServerID: int(serverID),
+	}, true, nil
+}
+
+func parseDisconnect(input string) (Disconnect, bool, error) {
+	groups := disconnectPattern.FindStringSubmatch(input)
+	if len(groups) != 2 {
+		return Disconnect{}, false, nil
+	}
+
+	serverID, err := strconv.ParseInt(groups[1], 10, 64)
+	if err != nil {
+		return Disconnect{}, false, err
+	}
+
+	return Disconnect{
+		ServerID: int(serverID),
+	}, true, nil
 }
