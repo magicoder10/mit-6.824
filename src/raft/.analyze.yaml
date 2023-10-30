@@ -2,36 +2,42 @@ pipelines:
   server0:
     - or:
       - serverID:0
+      - \[Test\]
       - Passed
       - 'panic: test timed out after'
   server1:
     - or:
       - serverID:1
+      - \[Test\]
       - Passed
       - 'panic: test timed out after'
   server2:
     - or:
       - serverID:2
+      - \[Test\]
       - Passed
       - 'panic: test timed out after'
   server3:
     - or:
       - serverID:3
+      - \[Test\]
       - Passed
       - 'panic: test timed out after'
   server4:
     - or:
       - serverID:4
+      - \[Test\]
       - Passed
       - 'panic: test timed out after'
   test:
     - or:
       - start[0-9]+\([0-9]+\)
-      - Start\([0-9]+\)
       - crash[0-9]+\([0-9]+\)
       - connect\([0-9]+\)
       - disconnect\([0-9]+\)
       - one\([0-9]+\)
+      - Start\([0-9]+\)
+      - \[Test\]
       - Passed
       - 'panic: test timed out after'
   kill:
@@ -40,46 +46,96 @@ pipelines:
       - Kill exit
       - flow:Termination
       - 'panic: test timed out after'
-  cancel-0:
+  leader:
     - or:
-      - serverID:2
+      - role:Leader
+      - start[0-9]+\([0-9]+\)
+      - crash[0-9]+\([0-9]+\)
+      - connect\([0-9]+\)
+      - disconnect\([0-9]+\)
+      - one\([0-9]+\)
+      - Passed
+      - 'panic: test timed out after'
+  committed:
     - or:
-      - \(id=0
-  cancel-1:
+      - received commitIndex
+      - commitIndex updated to
+      - update commitIndex to
+      - \[Test\]
+  committed-term-84:
     - or:
-      - serverID:2
+        - received commitIndex
+        - commitIndex updated to
+        - update commitIndex to
+        - \[Test\]
     - or:
-      - \(id=1
-  cancel-2:
+        - term:84
+  applied:
     - or:
-      - serverID:2
+      - received commitIndex
+      - applying log entry [0-9:]+ \[LogEntry Command:5038,
+      - lastAppliedIndex=
+      - \[Test\]
+  term-84:
     - or:
-      - \(id=2
-  cancel-3:
+      - term:84
+      - start[0-9]+\([0-9]+\)
+      - crash[0-9]+\([0-9]+\)
+      - connect\([0-9]+\)
+      - disconnect\([0-9]+\)
+      - one\([0-9]+\)
+      - \[Network\]
+      - Passed
+      - 'panic:'
+  msg-251-and-282:
     - or:
-      - serverID:2
+      - sender:3 receiver:2 messageID:251
+      - sender:2 receiver:3 messageID:251
+      - sender:3 receiver:2 messageID:282
+      - sender:2 receiver:3 messageID:282
+      - start[0-9]+\([0-9]+\)
+      - crash[0-9]+\([0-9]+\)
+      - connect\([0-9]+\)
+      - disconnect\([0-9]+\)
+      - one\([0-9]+\)
+      - \[Network\]\[(true|false)\] {MessageID:251
+      - \[Network\]\[(true|false)\] {MessageID:282
+  append-entry-2:
     - or:
-      - \(id=3
-  cancel-4:
+      - enter replicateLogToOnePeer 2
+      - canceled, exit replicateLogToOnePeer for 2
+      - onNewCommandIndexCh closed, exit replicateLogToOnePeer for 2
+      - canceled, exit replicateLogToOnePeer for 2
+      - 'command index outdated, skipping: peer=2, commandIndex=\d+, endOfLog=\d+'
+      - sender:3 receiver:2 messageID:182
+      - sender:3 receiver:2 messageID:184
+      - sender:3 receiver:2 messageID:185
+      - sender:3 receiver:2 messageID:213
+      - sender:3 receiver:2 messageID:251
+      - sender:3 receiver:2 messageID:282
+      - sender:3 receiver:2 messageID:303
+      - sender:3 receiver:2 messageID:304
+      - sender:3 receiver:2 messageID:334
+      - sender:2 receiver:3 messageID:182
+      - sender:2 receiver:3 messageID:184
+      - sender:2 receiver:3 messageID:185
+      - sender:2 receiver:3 messageID:213
+      - sender:2 receiver:3 messageID:251
+      - sender:2 receiver:3 messageID:282
+      - sender:2 receiver:3 messageID:303
+      - sender:2 receiver:3 messageID:304
+      - sender:2 receiver:3 messageID:334
+      - \[Network\]\[(true|false)\] {MessageID:\d+ SenderID:3 ReceiverID:2}
+      - \[Network\]\[(true|false)\] {MessageID:\d+ SenderID:2 ReceiverID:3}
+      - append new log entry
+      - Start\(54\)
     - or:
-      - serverID:2
+      - term:84
+      - \[Network\]
+  server-3-term-84:
     - or:
-      - \(id=4
-  cancel-5:
+      - serverID:3
     - or:
-      - serverID:2
+      - term:84
     - or:
-      - \(id=5
-  cancel-6:
-    - or:
-      - serverID:2
-    - or:
-      - \(id=6
-  raft-748:
-    - or:
-      - \(id=6
-    - or:
-      - task=raft.go:748
-  term-9:
-    - or:
-      - term:9
+      - flow:LogReplication

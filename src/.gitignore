@@ -12,3 +12,4 @@ mr-out*
 /main/mrcoordinator
 /main/mrsequential
 /main/mrworker
+logs/
