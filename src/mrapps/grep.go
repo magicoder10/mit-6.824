@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"6.5840/mr"
+	"mit-6.824/mr"
 )
 
 var pattern = regexp.MustCompile("Author")

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"6.5840/mr"
+	"mit-6.824/mr"
 )
 
 // The map function is called once for each file of input.

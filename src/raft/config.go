@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"6.5840/labgob"
-	"6.5840/labrpc"
+	"mit-6.824/labgob"
+	"mit-6.824/labrpc"
 )
 
 const printConfigDebugLog = false

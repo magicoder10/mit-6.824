@@ -3,7 +3,7 @@ package main
 //
 // pbservice client application
 //
-// export GOPATH=~/6.5840
+// export GOPATH=~/6.824
 // go build viewd.go
 // go build pbd.go
 // go build pbc.go
@@ -18,9 +18,12 @@ package main
 // and restart them to exercise fault tolerance.
 //
 
-import "6.5840/pbservice"
-import "os"
-import "fmt"
+import (
+	"fmt"
+	"os"
+
+	"mit-6.824/pbservice"
+)
 
 func usage() {
 	fmt.Printf("Usage: pbc viewport key\n")
