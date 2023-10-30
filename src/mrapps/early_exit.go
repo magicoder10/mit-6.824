@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/mr"
+	"github.com/magicoder10/mit-6.824/srcmr"
 )
 
 // The map function is called once for each file of input.

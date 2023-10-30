@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"math/big"
 
-	"github.com/magicoder10/mit-6.824/labrpc"
+	"github.com/magicoder10/mit-6.824/srclabrpc"
 )
 
 type Clerk struct {

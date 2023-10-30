@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/mr"
+	"github.com/magicoder10/mit-6.824/srcmr"
 )
 
 func main() {

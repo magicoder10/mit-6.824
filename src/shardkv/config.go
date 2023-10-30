@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/labrpc"
-	"github.com/magicoder10/mit-6.824/raft"
-	"github.com/magicoder10/mit-6.824/shardctrler"
+	"github.com/magicoder10/mit-6.824/srclabrpc"
+	"github.com/magicoder10/mit-6.824/srcraft"
+	"github.com/magicoder10/mit-6.824/srcshardctrler"
 )
 
 // import "log"

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/models"
-	"github.com/magicoder10/mit-6.824/porcupine"
+	"github.com/magicoder10/mit-6.824/srcmodels"
+	"github.com/magicoder10/mit-6.824/srcporcupine"
 )
 
 const linearizabilityCheckTimeout = 1 * time.Second

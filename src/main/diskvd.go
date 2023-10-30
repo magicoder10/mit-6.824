@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/diskv"
+	"github.com/magicoder10/mit-6.824/srcdiskv"
 )
 
 func usage() {

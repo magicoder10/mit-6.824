@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/labgob"
-	"github.com/magicoder10/mit-6.824/labrpc"
+	"github.com/magicoder10/mit-6.824/srclabgob"
+	"github.com/magicoder10/mit-6.824/srclabrpc"
 )
 
 const printConfigDebugLog = false

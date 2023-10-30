@@ -1,4 +1,4 @@
-module github.com/magicoder10/mit-6.824
+module github.com/magicoder10/mit-6.824/src
 
 go 1.21
 

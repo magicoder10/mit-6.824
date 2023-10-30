@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/models"
-	"github.com/magicoder10/mit-6.824/porcupine"
+	"github.com/magicoder10/mit-6.824/srcmodels"
+	"github.com/magicoder10/mit-6.824/srcporcupine"
 )
 
 // The tester generously allows solutions to complete elections in one second

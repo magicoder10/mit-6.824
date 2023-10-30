@@ -5,9 +5,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/magicoder10/mit-6.824/labgob"
-	"github.com/magicoder10/mit-6.824/labrpc"
-	"github.com/magicoder10/mit-6.824/raft"
+	"github.com/magicoder10/mit-6.824/srclabgob"
+	"github.com/magicoder10/mit-6.824/srclabrpc"
+	"github.com/magicoder10/mit-6.824/srcraft"
 )
 
 const Debug = false

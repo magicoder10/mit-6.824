@@ -8,8 +8,6 @@ import (
 	"crypto/rand"
 	"math/big"
 	"time"
-
-	"github.com/magicoder10/mit-6.824/labrpc"
 )
 
 type Clerk struct {

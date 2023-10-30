@@ -60,7 +60,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/labgob"
+	"github.com/magicoder10/mit-6.824/srclabgob"
 )
 
 const printDebugLog = false

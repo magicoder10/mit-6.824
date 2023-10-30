@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/magicoder10/mit-6.824/viewservice"
+	"github.com/magicoder10/mit-6.824/srcviewservice"
 )
 
 func main() {
