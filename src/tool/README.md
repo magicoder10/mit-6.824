@@ -3,7 +3,7 @@ Enable everyone to debug and finish 6.824 labs with ease.
 
 ## Installation
 ```bash
-go install github.com/magicoder10/mit-6.824/tool/analyze.go
+go install analyze.go
 ```
 
 ## Usage
