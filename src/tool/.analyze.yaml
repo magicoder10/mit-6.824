@@ -1,0 +1,14 @@
+pipelines:
+  - server0: |
+      (And
+        (Or 
+          (Pattern "serverID:0") 
+          (Pattern "\\[Test\\]") 
+          (Pattern "Passed") 
+          (Pattern "panic: test timed out after"))
+          (Not 
+            (Pattern "TestCommit"))
+          (GreaterThan 
+            (Extract "Num(\d+)" 0) 10)
+        (LessThan 
+          (Extract "Num(\d+)" 0) 20)))

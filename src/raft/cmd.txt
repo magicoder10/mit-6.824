@@ -12,4 +12,4 @@ rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --time
 
 rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 80s --iter 2000 TestPersist12C TestPersist22C TestPersist32C TestFigure82C TestUnreliableAgree2C TestFigure8Unreliable2C
 
-rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 80s --iter 5000 TestFigure8Unreliable2C
+rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 80s --iter 10000 TestFigure8Unreliable2C

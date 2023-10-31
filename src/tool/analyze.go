@@ -15,58 +15,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var goroutinesPattern = regexp.MustCompile("goroutines:(\\d+)")
-var runningTasksPattern = regexp.MustCompile("runningTasks=map\\[([a-zA-Z0-9.: ]+)]")
-
-var taskCountPattern = regexp.MustCompile("([a-zA-Z0-9.]+:\\d+):(\\d+)")
-
-var connectPattern = regexp.MustCompile("^connect\\(([0-9]+)\\)")
-var disconnectPattern = regexp.MustCompile("^disconnect\\(([0-9]+)\\)")
-
-type ConnectionState string
-
-const (
-	ConnectedConnectionState    ConnectionState = "Connected"
-	DisconnectedConnectionState ConnectionState = "Disconnected"
-)
-
-type State struct {
-	Network map[int]ConnectionState
-}
-
-type Stats struct {
-	MaxGoroutines int
-	MaxTaskCount  map[string]int
-}
-
-type Goroutines struct {
-	Count int
-}
-
-type RunningTasks struct {
-	TaskCount map[string]int
-}
-
-type TaskCount struct {
-	TaskName string
-	Count    int
-}
-
-type Connect struct {
-	ServerID int
-}
-
-type Disconnect struct {
-	ServerID int
-}
-
 type Analyze struct {
 	Pipelines map[string]Pipeline
 }
-
-type Pipeline []OrOperator
-
-type OrOperator []*regexp.Regexp
 
 var configFilePath string
 var inputFilePath string
