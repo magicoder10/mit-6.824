@@ -26,7 +26,7 @@ import (
 	"6.5840/labrpc"
 )
 
-const printConfigDebugLog = false
+const printConfigDebugLog = true
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -260,6 +260,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 					xlog = append(xlog, cfg.logs[i][j])
 				}
 				e.Encode(xlog)
+				fmt.Printf("take snapshot for server %v: lastIncludedLogIndex:=%v\n, commitedLogs=%v\n", i, m.CommandIndex, cfg.logs[i])
 				rf.Snapshot(m.CommandIndex, w.Bytes())
 			}
 		} else {
@@ -624,14 +625,14 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cfg.t.Fatalf("one(%v) failed to reach agreement: %v\n", cmd, cfg.logs)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
 	if cfg.checkFinished() == false {
-		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+		cfg.t.Fatalf("one(%v) failed to reach agreement: %v\n", cmd, cfg.logs)
 	}
 	return -1
 }

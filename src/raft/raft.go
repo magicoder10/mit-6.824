@@ -30,50 +30,6 @@ const (
 	ServerRole Role = "Server"
 )
 
-type RequestVoteArgs struct {
-	MessageID    uint64
-	Term         int
-	CandidateID  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-type RequestVoteReply struct {
-	Term        int
-	VoteGranted bool
-}
-
-type AppendEntriesArgs struct {
-	MessageID         uint64
-	Term              int
-	LeaderID          int
-	PrevLogIndex      int
-	PreLogTerm        int
-	LogEntries        []LogEntry
-	LeaderCommitIndex int
-}
-
-type AppendEntriesReply struct {
-	Term                 int
-	Success              bool
-	HasPrevLogConflict   bool
-	ConflictTerm         *int
-	ConflictIndex        int
-	ConflictLogLastIndex int
-}
-
-var _ fmt.Stringer = (*AppendEntriesReply)(nil)
-
-func (a AppendEntriesReply) String() string {
-	return fmt.Sprintf("[AppendEntriesReply Term:%v, Success:%v, HasPrevLogConflict:%v, ConflictTerm:%v, ConflictIndex:%v, ConflictLogLastIndex:%v]",
-		a.Term,
-		a.Success,
-		a.HasPrevLogConflict,
-		fmtPtr(a.ConflictTerm),
-		a.ConflictIndex,
-		a.ConflictLogLastIndex)
-}
-
 type LogEntry struct {
 	Command interface{}
 	Index   int
@@ -84,6 +40,18 @@ var _ fmt.Stringer = (*LogEntry)(nil)
 
 func (l LogEntry) String() string {
 	return fmt.Sprintf("[LogEntry Command:%v, Index:%v, Term:%v]", l.Command, l.Index, l.Term)
+}
+
+type Snapshot struct {
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+var _ fmt.Stringer = (*Snapshot)(nil)
+
+func (s Snapshot) String() string {
+	return fmt.Sprintf("[Snapshot LastIncludedIndex:%v, LastIncludedTerm:%v]", s.LastIncludedIndex, s.LastIncludedTerm)
 }
 
 // as each Raft peer becomes aware that successive log entries are
@@ -100,7 +68,6 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 
-	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
 	SnapshotTerm  int
@@ -117,6 +84,7 @@ type Raft struct {
 	currentTerm int
 	votedFor    *int
 	logEntries  []LogEntry
+	snapshot    Snapshot
 
 	// volatile state on all servers
 	serverID             int // this peer's index into peers[]
@@ -129,15 +97,19 @@ type Raft struct {
 	nextIndices  []int
 	matchIndices []int
 
+	pendingSnapshotsToApply int
+
 	applyCh                   chan ApplyMsg
 	onNewCommandIndexSignals  []*Signal[int]
+	onNewSnapshotSignal       *Signal[Snapshot]
 	onMatchIndexChangeSignal  *Signal[int]
 	onCommitIndexChangeSignal *Signal[int]
 
 	locks map[uint64]struct{}
 
-	roleCancelContext   *CancelContext
-	serverCancelContext *CancelContext
+	applyEntriesCancelContext *CancelContext
+	roleCancelContext         *CancelContext
+	serverCancelContext       *CancelContext
 
 	nextLockID          uint64
 	nextMessageID       uint64
@@ -156,9 +128,40 @@ func (rf *Raft) GetState() (int, bool) {
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
+func (rf *Raft) Snapshot(snapshotLastIncludedIndex int, snapshotData []byte) {
+	unlocker := rf.lock(SnapshotFlow)
+	defer unlocker.unlock(SnapshotFlow)
+	Log(rf.logContext(SnapshotFlow), InfoLevel, "enter Snapshot: snapshotLastIncludedIndex=%v", snapshotLastIncludedIndex)
+	defer Log(rf.logContext(SnapshotFlow), InfoLevel, "exit Snapshot")
 
+	if rf.serverCancelContext.IsCanceled(rf.logContext(SnapshotFlow)) {
+		Log(rf.logContext(SnapshotFlow), InfoLevel, "server canceled, exit Snapshot")
+		return
+	}
+
+	if rf.applyEntriesCancelContext != nil {
+		rf.applyEntriesCancelContext.TryCancel(rf.logContext(SnapshotFlow))
+		rf.applyEntriesCancelContext = nil
+	}
+
+	relativeIndex := rf.toRelativeIndex(snapshotLastIncludedIndex)
+	snapshotLastIncludedTerm := rf.logEntries[relativeIndex].Term
+	rf.snapshot = Snapshot{
+		LastIncludedIndex: snapshotLastIncludedIndex,
+		LastIncludedTerm:  snapshotLastIncludedTerm,
+		Data:              snapshotData,
+	}
+	Log(rf.logContext(SnapshotFlow), InfoLevel, "before discarding log entries: snapshotLastIncludedIndex=%v, relativeSnapshotLastIncludedIndex=%v, logEntries=%v",
+		rf.snapshot.LastIncludedIndex,
+		relativeIndex,
+		rf.logEntries)
+	rf.logEntries = rf.logEntries[relativeIndex+1:]
+	Log(rf.logContext(SnapshotFlow), InfoLevel, "after discarding log entries: logEntries=%v", rf.logEntries)
+	rf.persist(SnapshotFlow)
+
+	rf.pendingSnapshotsToApply++
+	rf.onNewSnapshotSignal.Send(rf.snapshot)
+	Log(rf.logContext(SnapshotFlow), InfoLevel, "notified new snapshot to apply: snapshot=%v", rf.snapshot)
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -326,11 +329,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex,
 		rf.logEntries)
 
-	relativePrevLogIndex := rf.toRelativeLogIndex(args.PrevLogIndex)
-	if relativePrevLogIndex > rf.toRelativeLogIndex(len(rf.logEntries)) {
+	relativePrevLogIndex := rf.toRelativeIndex(args.PrevLogIndex)
+	if relativePrevLogIndex > len(rf.logEntries)-1 {
 		reply.Success = false
 		reply.HasPrevLogConflict = true
-		reply.ConflictLogLastIndex = len(rf.logEntries)
+		reply.ConflictLogLastIndex = rf.toAbsoluteLogIndex(len(rf.logEntries) - 1)
 		LogMessage(
 			rf.messageContext(LogReplicationFlow, args.LeaderID, rf.serverID, args.MessageID),
 			InfoLevel,
@@ -444,15 +447,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	Log(rf.logContext(LogReplicationFlow), InfoLevel, "enter Start")
 	defer Log(rf.logContext(LogReplicationFlow), InfoLevel, "exit Start")
 
+	nextIndex := rf.toAbsoluteLogIndex(len(rf.logEntries))
 	if !rf.serverCancelContext.IsCanceled(rf.logContext(LogReplicationFlow)) && rf.currentRole == LeaderRole {
 		roleCancelContext := rf.roleCancelContext
-		nextIndex := len(rf.logEntries)
-		logEntry := append(rf.logEntries, LogEntry{
+		logEntry := LogEntry{
 			Command: command,
-			Index:   nextIndex + 1,
+			Index:   nextIndex,
 			Term:    rf.currentTerm,
-		})
-		rf.logEntries = logEntry
+		}
+		rf.logEntries = append(rf.logEntries, logEntry)
 		rf.persist(LogReplicationFlow)
 		Log(rf.logContext(LogReplicationFlow), InfoLevel, "append new log entry: newEntry=%v logEntries=%v", logEntry, rf.logEntries)
 
@@ -467,11 +470,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				break
 			}
 
-			signal.Send(nextIndex + 1)
+			signal.Send(nextIndex)
 		}
 	}
 
-	return len(rf.logEntries), rf.currentTerm, rf.currentRole == LeaderRole
+	return nextIndex, rf.currentTerm, rf.currentRole == LeaderRole
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -501,6 +504,9 @@ func (rf *Raft) Kill() {
 
 	Log(rf.logContext(TerminationFlow), InfoLevel, "close onCommitIndexChangeCh")
 	rf.onCommitIndexChangeSignal.Close()
+
+	Log(rf.logContext(TerminationFlow), InfoLevel, "close onNewSnapshotCh")
+	rf.onNewSnapshotSignal.Close()
 
 	Log(rf.logContext(TerminationFlow), InfoLevel, "close onMatchIndexChangeCh")
 	rf.onMatchIndexChangeSignal.Close()
@@ -673,8 +679,12 @@ func (rf *Raft) runAsLeader() {
 				continue
 			}
 
-			rf.nextIndices[peerServerID] = len(rf.logEntries) + 1
+			rf.nextIndices[peerServerID] = rf.toAbsoluteLogIndex(len(rf.logEntries))
 			rf.matchIndices[peerServerID] = 0
+			Log(rf.logContext(LeaderFlow), InfoLevel, "initialize nextIndex and matchIndex for %v: nextIndex=%v, matchIndex=%v",
+				peerServerID,
+				rf.nextIndices[peerServerID],
+				rf.matchIndices[peerServerID])
 		}
 
 		sendHeartbeatsFinisher := newRoleCancelContext.Add(rf.logContext(LeaderFlow), 1)
@@ -908,10 +918,11 @@ func (rf *Raft) sendHeartbeats(cancelContext *CancelContext) {
 
 		currentTerm := rf.currentTerm
 		leaderID := rf.serverID
-		prevLogIndex := len(rf.logEntries)
-		prevLogTerm := 0
-		if prevLogIndex > 0 {
-			prevLogTerm = rf.logEntries[prevLogIndex-1].Term
+		relativeIndex := len(rf.logEntries) - 1
+		prevLogIndex := rf.toAbsoluteLogIndex(relativeIndex)
+		prevLogTerm := rf.snapshot.LastIncludedTerm
+		if prevLogIndex > rf.snapshot.LastIncludedIndex {
+			prevLogTerm = rf.logEntries[relativeIndex].Term
 		}
 
 		leaderCommitIndex := rf.commitIndex
@@ -1048,7 +1059,7 @@ func (rf *Raft) replicateLogToOnePeer(cancelContext *CancelContext, peerServerID
 			return
 		}
 
-		lastEntryIndex := len(rf.logEntries)
+		lastEntryIndex := rf.toAbsoluteLogIndex(len(rf.logEntries) - 1)
 		if rf.matchIndices[peerServerID] == lastEntryIndex {
 			logContext := rf.logContext(LogReplicationFlow)
 			replicateLogUnlocker.unlock(LogReplicationFlow)
@@ -1078,7 +1089,7 @@ func (rf *Raft) replicateLogToOnePeer(cancelContext *CancelContext, peerServerID
 				return
 			}
 
-			lastEntryIndex = len(rf.logEntries)
+			lastEntryIndex = rf.toAbsoluteLogIndex(len(rf.logEntries) - 1)
 			if commandIndex < lastEntryIndex {
 				Log(rf.logContext(LogReplicationFlow), InfoLevel, "command index outdated, skipping: peer=%v, commandIndex=%v, endOfLog=%v",
 					peerServerID,
@@ -1091,12 +1102,18 @@ func (rf *Raft) replicateLogToOnePeer(cancelContext *CancelContext, peerServerID
 
 		nextIndex := rf.nextIndices[peerServerID]
 		prevLogIndex := nextIndex - 1
-		prevLogTerm := 0
-		if prevLogIndex > 0 {
-			prevLogTerm = rf.logEntries[rf.toRelativeLogIndex(prevLogIndex)].Term
+		prevLogTerm := rf.snapshot.LastIncludedTerm
+		if prevLogIndex > rf.snapshot.LastIncludedIndex {
+			prevLogTerm = rf.logEntries[rf.toRelativeIndex(prevLogIndex)].Term
 		}
 
-		logEntries := rf.logEntries[rf.toRelativeLogIndex(nextIndex):]
+		Log(rf.logContext(LogReplicationFlow), InfoLevel, "replicate log to %v: relativeIndex=%v, nextIndex=%v, snapshotLastIncludedIndex=%v, snapshotLastIncludedTerm=%v",
+			peerServerID,
+			rf.toRelativeIndex(nextIndex),
+			nextIndex,
+			rf.snapshot.LastIncludedIndex,
+			rf.snapshot.LastIncludedTerm)
+		logEntries := rf.logEntries[rf.toRelativeIndex(nextIndex):]
 		messageID := rf.nextMessageID
 		args := &AppendEntriesArgs{
 			MessageID:         messageID,
@@ -1216,7 +1233,7 @@ func (rf *Raft) replicateLogToOnePeer(cancelContext *CancelContext, peerServerID
 			newNextIndex = result.reply.ConflictLogLastIndex + 1
 		} else {
 			newNextIndex = result.reply.ConflictIndex
-			for relativeIndex := rf.toRelativeLogIndex(len(rf.logEntries)); relativeIndex >= 0; relativeIndex-- {
+			for relativeIndex := rf.toRelativeIndex(len(rf.logEntries)); relativeIndex >= 0; relativeIndex-- {
 				if rf.logEntries[relativeIndex].Term == *result.reply.ConflictTerm {
 					newNextIndex = rf.toAbsoluteLogIndex(relativeIndex)
 					break
@@ -1278,7 +1295,7 @@ func (rf *Raft) updateCommitIndex(cancelContext *CancelContext) {
 
 func (rf *Raft) tryUpdateCommitIndex(matchIndex int) {
 	for index := matchIndex; index > rf.commitIndex; index-- {
-		if rf.logEntries[rf.toRelativeLogIndex(index)].Term != rf.currentTerm {
+		if rf.logEntries[rf.toRelativeIndex(index)].Term != rf.currentTerm {
 			// only commit entries from current term
 			continue
 		}
@@ -1294,86 +1311,206 @@ func (rf *Raft) tryUpdateCommitIndex(matchIndex int) {
 	return
 }
 
-func (rf *Raft) applyCommittedEntries() {
-	applyCommittedEntriesUnlocker := rf.lock(ApplyEntryFlow)
-	Log(rf.logContext(ApplyEntryFlow), InfoLevel, "enter applyCommittedEntries")
-	onCommitIndexChangeCh := rf.onCommitIndexChangeSignal.ReceiveChan()
-	applyCommittedEntriesUnlocker.unlock(ApplyEntryFlow)
+func (rf *Raft) applyCommittedEntriesAndSnapshot() {
+	applyCommittedEntriesUnlocker := rf.lock(ApplyFlow)
+	Log(rf.logContext(ApplyFlow), InfoLevel, "enter applyCommittedEntries")
+	onCommitIndexChangeSignalCh := rf.onCommitIndexChangeSignal.ReceiveChan()
+	onNewSnapshotSignalCh := rf.onNewSnapshotSignal.ReceiveChan()
+	applyCommittedEntriesUnlocker.unlock(ApplyFlow)
 
 	for {
-		applyUnlocker := rf.lock(ApplyEntryFlow)
-		logContext := rf.logContext(ApplyEntryFlow)
-		applyUnlocker.unlock(ApplyEntryFlow)
+		applyUnlocker := rf.lock(ApplyFlow)
+		logContext := rf.logContext(ApplyFlow)
+		applyUnlocker.unlock(ApplyFlow)
 
 		commitIndex := 0
 		var ok bool
 		select {
-		case commitIndex, ok = <-onCommitIndexChangeCh:
+		case commitIndex, ok = <-onCommitIndexChangeSignalCh:
+			logUnlocker := rf.lock(ApplyEntryFlow)
 			if !ok {
-				logUnlocker := rf.lock(ApplyEntryFlow)
 				Log(rf.logContext(ApplyEntryFlow), InfoLevel, "onCommitIndexChangeCh closed, exit applyCommittedEntries")
 				logUnlocker.unlock(ApplyEntryFlow)
 				return
 			}
+
+			if rf.pendingSnapshotsToApply > 0 {
+				Log(rf.logContext(ApplyEntryFlow), InfoLevel, "applying snapshots, skip applying log entries: commitIndex=%v, pendingApplySnapshots=%v",
+					commitIndex,
+					rf.pendingSnapshotsToApply)
+				logUnlocker.unlock(ApplyEntryFlow)
+				continue
+			}
+
+			logUnlocker.unlock(ApplyEntryFlow)
+			if !rf.applyCommittedLogEntries(commitIndex) {
+				return
+			}
+		case snapshot, ok := <-onNewSnapshotSignalCh:
+			if !ok {
+				logUnlocker := rf.lock(SnapshotFlow)
+				Log(rf.logContext(SnapshotFlow), InfoLevel, "onNewSnapshotSignalCh closed, exit applyCommittedEntries")
+				logUnlocker.unlock(SnapshotFlow)
+				return
+			}
+
+			if !rf.applySnapshot(snapshot) {
+				return
+			}
+
+		case <-rf.serverCancelContext.OnCancel(logContext):
+			logUnlocker := rf.lock(ApplyFlow)
+			Log(rf.logContext(ApplyFlow), InfoLevel, "canceled, exit applyCommittedEntries")
+			logUnlocker.unlock(ApplyFlow)
+			return
+		}
+	}
+}
+
+func (rf *Raft) applyCommittedLogEntries(commitIndex int) bool {
+	applyUnlocker := rf.lock(ApplyEntryFlow)
+	Log(rf.logContext(ApplyEntryFlow), InfoLevel, "enter applyCommittedLogEntries: commitIndex=%v, snapshotLastIncludedIndex=%v, snapshotLastIncludedTerm=%v",
+		commitIndex,
+		rf.snapshot.LastIncludedIndex,
+		rf.snapshot.LastIncludedTerm)
+	defer Log(rf.logContext(ApplyEntryFlow), InfoLevel, "exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
+	if rf.serverCancelContext.IsCanceled(rf.logContext(ApplyEntryFlow)) {
+		Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedLogEntries")
+		applyUnlocker.unlock(ApplyEntryFlow)
+		return false
+	}
+
+	Log(rf.logContext(ApplyEntryFlow), InfoLevel, "received commitIndex: commitIndex=%v, lastAppliedIndex=%v", commitIndex, rf.lastAppliedIndex)
+	if commitIndex <= rf.lastAppliedIndex {
+		Log(rf.logContext(ApplyEntryFlow), InfoLevel, "commitIndex <= lastAppliedIndex, skip")
+		applyUnlocker.unlock(ApplyEntryFlow)
+		return true
+	}
+
+	cancelContext := newCancelContext(rf.nextCancelContextID, fmt.Sprintf("applyCommittedLogEntries:%v", commitIndex))
+	rf.applyEntriesCancelContext = cancelContext
+	applyUnlocker.unlock(ApplyEntryFlow)
+
+	for index := rf.lastAppliedIndex + 1; index <= commitIndex; index++ {
+		applyUnlocker = rf.lock(ApplyEntryFlow)
+		if cancelContext.IsCanceled(rf.logContext(ApplyEntryFlow)) {
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
+			applyUnlocker.unlock(ApplyEntryFlow)
+			return true
+		}
+
+		if rf.serverCancelContext.IsCanceled(rf.logContext(ApplyEntryFlow)) {
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
+			applyUnlocker.unlock(ApplyEntryFlow)
+			return false
+		}
+
+		relativeIndex := rf.toRelativeIndex(index)
+		Log(rf.logContext(ApplyEntryFlow), InfoLevel, "before applying log entry: commitIndex=%v, lastAppliedIndex=%v, index=%v, snapshotLastIncludedIndex=%v, snapshotLastIncludedTerm=%v, relativeIndex=%v",
+			commitIndex,
+			rf.lastAppliedIndex,
+			index,
+			rf.snapshot.LastIncludedIndex,
+			rf.snapshot.LastIncludedTerm,
+			relativeIndex)
+		logEntry := rf.logEntries[relativeIndex]
+		logContext := rf.logContext(ApplyEntryFlow)
+		Log(logContext, InfoLevel, "applying log entry: commitIndex=%v, index=%v, logEntry=%v, logEntries=%v",
+			commitIndex,
+			index,
+			logEntry,
+			rf.logEntries)
+		applyUnlocker.unlock(ApplyEntryFlow)
+
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			Command:      logEntry.Command,
+			CommandIndex: index,
+		}
+
+		select {
+		case rf.applyCh <- applyMsg:
+		case <-cancelContext.OnCancel(logContext):
+			logUnlocker := rf.lock(ApplyEntryFlow)
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
+			logUnlocker.unlock(ApplyEntryFlow)
+			return true
 		case <-rf.serverCancelContext.OnCancel(logContext):
 			logUnlocker := rf.lock(ApplyEntryFlow)
-			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedEntries")
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "role canceled, exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
 			logUnlocker.unlock(ApplyEntryFlow)
-			return
+			return false
 		}
 
 		applyUnlocker = rf.lock(ApplyEntryFlow)
-		Log(rf.logContext(ApplyEntryFlow), InfoLevel, "received commitIndex %v", commitIndex)
+		if cancelContext.IsCanceled(rf.logContext(ApplyEntryFlow)) {
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
+			applyUnlocker.unlock(ApplyEntryFlow)
+			return true
+		}
+
 		if rf.serverCancelContext.IsCanceled(rf.logContext(ApplyEntryFlow)) {
-			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedEntries")
+			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
 			applyUnlocker.unlock(ApplyEntryFlow)
-			return
+			return false
 		}
 
-		if commitIndex <= rf.lastAppliedIndex {
-			Log(rf.logContext(ApplyEntryFlow), InfoLevel, "commitIndex:%v <= lastAppliedIndex:%v, skip", commitIndex, rf.lastAppliedIndex)
-			applyUnlocker.unlock(ApplyEntryFlow)
-			continue
-		}
-
-		applyUnlocker.unlock(ApplyEntryFlow)
-
-		for index := rf.lastAppliedIndex + 1; index <= commitIndex; index++ {
-			applyUnlocker = rf.lock(ApplyEntryFlow)
-
-			if rf.serverCancelContext.IsCanceled(rf.logContext(ApplyEntryFlow)) {
-				Log(rf.logContext(ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedEntries")
-				applyUnlocker.unlock(ApplyEntryFlow)
-				return
-			}
-
-			logEntry := rf.logEntries[rf.toRelativeLogIndex(index)]
-			logContext = rf.logContext(ApplyEntryFlow)
-			Log(logContext, InfoLevel, "applying log entry %v: %v", index, logEntry)
-			applyUnlocker.unlock(ApplyEntryFlow)
-
-			applyMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      logEntry.Command,
-				CommandIndex: index,
-			}
-
-			select {
-			case rf.applyCh <- applyMsg:
-			case <-rf.serverCancelContext.OnCancel(logContext):
-				logUnlocker := rf.lock(ApplyEntryFlow)
-				Log(rf.logContext(ApplyEntryFlow), InfoLevel, "role canceled, exit applyCommittedEntries")
-				logUnlocker.unlock(ApplyEntryFlow)
-				return
-			}
-
-			rf.lastAppliedIndex = index
-		}
-
-		applyUnlocker = rf.lock(ApplyEntryFlow)
-		Log(rf.logContext(ApplyEntryFlow), InfoLevel, "finish applying log entries: lastAppliedIndex=%v", rf.lastAppliedIndex)
+		rf.lastAppliedIndex = index
 		applyUnlocker.unlock(ApplyEntryFlow)
 	}
+
+	applyUnlocker = rf.lock(ApplyEntryFlow)
+	rf.applyEntriesCancelContext = nil
+	Log(rf.logContext(ApplyEntryFlow), InfoLevel, "finish applying log entries: commitIndex=%v ,lastAppliedIndex=%v", rf.commitIndex, rf.lastAppliedIndex)
+	applyUnlocker.unlock(ApplyEntryFlow)
+	return true
+}
+
+func (rf *Raft) applySnapshot(snapshot Snapshot) bool {
+	applyUnlocker := rf.lock(SnapshotFlow)
+	if rf.serverCancelContext.IsCanceled(rf.logContext(SnapshotFlow)) {
+		rf.pendingSnapshotsToApply--
+		Log(rf.logContext(SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
+		applyUnlocker.unlock(SnapshotFlow)
+		return false
+	}
+
+	Log(rf.logContext(SnapshotFlow), InfoLevel, "received snapshot: %+v", snapshot)
+	applyUnlocker.unlock(SnapshotFlow)
+	applyMsg := ApplyMsg{
+		SnapshotValid: true,
+		SnapshotIndex: snapshot.LastIncludedIndex,
+		SnapshotTerm:  snapshot.LastIncludedTerm,
+		Snapshot:      snapshot.Data,
+	}
+
+	select {
+	case rf.applyCh <- applyMsg:
+	case <-rf.serverCancelContext.OnCancel(rf.logContext(SnapshotFlow)):
+		logUnlocker := rf.lock(SnapshotFlow)
+		rf.pendingSnapshotsToApply--
+		Log(rf.logContext(SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
+		logUnlocker.unlock(SnapshotFlow)
+		return false
+	}
+
+	applyUnlocker = rf.lock(SnapshotFlow)
+	defer applyUnlocker.unlock(SnapshotFlow)
+	rf.pendingSnapshotsToApply--
+
+	if rf.serverCancelContext.IsCanceled(rf.logContext(SnapshotFlow)) {
+		Log(rf.logContext(SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
+		return false
+	}
+
+	rf.lastAppliedIndex = snapshot.LastIncludedIndex
+	Log(rf.logContext(SnapshotFlow), InfoLevel, "finish applying snapshot: lastAppliedIndex=%v", rf.lastAppliedIndex)
+	if rf.commitIndex > rf.lastAppliedIndex {
+		Log(rf.logContext(SnapshotFlow), InfoLevel, "apply remaining log entries after snapshot: lastAppliedIndex=%v, commitIndex=%v", rf.lastAppliedIndex, rf.commitIndex)
+		rf.onCommitIndexChangeSignal.Send(rf.commitIndex)
+	}
+
+	return true
 }
 
 func (rf *Raft) isReplicatedToMajority(index int) bool {
@@ -1396,14 +1533,12 @@ func (rf *Raft) isReplicatedToMajority(index int) bool {
 	return false
 }
 
-func (rf *Raft) toRelativeLogIndex(absoluteIndex int) int {
-	// TODO: convert index for snapshot
-	return absoluteIndex - 1
+func (rf *Raft) toRelativeIndex(absoluteIndex int) int {
+	return absoluteIndex - rf.snapshot.LastIncludedIndex - 1
 }
 
 func (rf *Raft) toAbsoluteLogIndex(relativeIndex int) int {
-	// TODO: convert index for snapshot
-	return relativeIndex + 1
+	return rf.snapshot.LastIncludedIndex + relativeIndex + 1
 }
 
 // save Raft's persistent state to stable storage,
@@ -1443,16 +1578,26 @@ func (rf *Raft) persist(flow Flow) {
 		Log(rf.logContext(flow), ErrorLevel, "failed to encode log: %v", err)
 	}
 
+	err = encoder.Encode(rf.snapshot.LastIncludedIndex)
+	if err != nil {
+		Log(rf.logContext(flow), ErrorLevel, "failed to encode snapshotLastIncludedIndex: %v", err)
+	}
+
+	err = encoder.Encode(rf.snapshot.LastIncludedIndex)
+	if err != nil {
+		Log(rf.logContext(flow), ErrorLevel, "failed to encode snapshotLastIncludedTerm: %v", err)
+	}
+
 	data := buf.Bytes()
-	rf.persister.Save(data, nil)
+	rf.persister.Save(data, rf.snapshot.Data)
 	Log(rf.logContext(flow), InfoLevel, "persist exit")
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte, flow Flow) {
+func (rf *Raft) readPersist(state []byte, snapshotData []byte, flow Flow) {
 	Log(rf.logContext(flow), InfoLevel, "readPersist enter")
 
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if state == nil || len(state) < 1 { // bootstrap without any state?
 		Log(rf.logContext(flow), InfoLevel, "readPersist exit")
 		return
 	}
@@ -1460,7 +1605,7 @@ func (rf *Raft) readPersist(data []byte, flow Flow) {
 	var currentTerm int
 	var votedFor *int
 	var log []LogEntry
-	buf := bytes.NewBuffer(data)
+	buf := bytes.NewBuffer(state)
 	decoder := labgob.NewDecoder(buf)
 	err := decoder.Decode(&currentTerm)
 	if err != nil {
@@ -1484,9 +1629,23 @@ func (rf *Raft) readPersist(data []byte, flow Flow) {
 		Log(rf.logContext(flow), ErrorLevel, "failed to decode logs: %v", err)
 	}
 
+	snapshot := Snapshot{
+		Data: snapshotData,
+	}
+	err = decoder.Decode(&snapshot.LastIncludedIndex)
+	if err != nil {
+		Log(rf.logContext(flow), ErrorLevel, "failed to decode snapshotLastIncludedIndex: %v", err)
+	}
+
+	err = decoder.Decode(&snapshot.LastIncludedTerm)
+	if err != nil {
+		Log(rf.logContext(flow), ErrorLevel, "failed to decode snapshotLastIncludedTerm: %v", err)
+	}
+
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
 	rf.logEntries = log
+	rf.snapshot = snapshot
 }
 
 // The labrpc package simulates a lossy network, in which servers
@@ -1639,9 +1798,11 @@ func Make(
 		lastAppliedIndex:          0,
 		nextIndices:               make([]int, len(peers)),
 		matchIndices:              make([]int, len(peers)),
+		pendingSnapshotsToApply:   0,
 		currentRole:               FollowerRole,
 		applyCh:                   applyCh,
 		onNewCommandIndexSignals:  onNewCommandIndexSignals,
+		onNewSnapshotSignal:       NewSignal[Snapshot](1),
 		onMatchIndexChangeSignal:  NewSignal[int](1),
 		onCommitIndexChangeSignal: NewSignal[int](1),
 		serverCancelContext:       cancelContext,
@@ -1652,7 +1813,7 @@ func Make(
 	nextCancelContextId++
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState(), SharedFlow)
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot(), SharedFlow)
 	finisher := cancelContext.Add(rf.logContext(SharedFlow), 1)
 	go func() {
 		unlocker := rf.lock(SharedFlow)
@@ -1660,8 +1821,13 @@ func Make(
 		defer finisher.Done(logContext)
 		unlocker.unlock(SharedFlow)
 
-		rf.applyCommittedEntries()
+		rf.applyCommittedEntriesAndSnapshot()
 	}()
+
+	if rf.snapshot.LastIncludedIndex > 0 {
+		rf.onNewSnapshotSignal.Send(rf.snapshot)
+	}
+
 	rf.runAsFollower()
 	// start ticker goroutine to start elections
 	return rf

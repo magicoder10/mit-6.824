@@ -22,7 +22,7 @@ import (
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-const printTestDebugLog = false
+const printTestDebugLog = true
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
@@ -1178,8 +1178,21 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 	cfg.begin(name)
 
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("1", 20))
+	}
+
 	cfg.one(rand.Int(), servers, true)
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("2", 20))
+	}
+
 	leader1 := cfg.checkOneLeader()
+
+	if printTestDebugLog {
+		fmt.Printf("[Test] %v\n", strings.Repeat("3", 20))
+	}
 
 	for i := 0; i < iters; i++ {
 		victim := (leader1 + 1) % servers

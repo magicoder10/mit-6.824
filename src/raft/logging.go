@@ -24,6 +24,7 @@ const (
 	CommitFlow         Flow = "Commit"
 	StateFlow          Flow = "State"
 	TerminationFlow    Flow = "Termination"
+	ApplyFlow          Flow = "Apply"
 	ApplyEntryFlow     Flow = "ApplyEntry"
 	SnapshotFlow       Flow = "Snapshot"
 )
@@ -62,6 +63,7 @@ var visibleFlows = map[Flow]bool{
 	CommitFlow:         true,
 	StateFlow:          true,
 	TerminationFlow:    true,
+	ApplyFlow:          true,
 	ApplyEntryFlow:     true,
 	SnapshotFlow:       true,
 }
