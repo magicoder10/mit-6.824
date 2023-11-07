@@ -2,30 +2,54 @@ pipelines:
   server0:
     - or:
       - serverID:0
+      - server 0
+      - start1\(0\)
+      - crash1\(0\)
+      - connect\(0\)
+      - disconnect\(0\)
       - \[Test\]
       - Passed
       - 'panic: test timed out after'
   server1:
     - or:
       - serverID:1
+      - start1\(1\)
+      - crash1\(1\)
+      - connect\(1\)
+      - disconnect\(1\)
       - \[Test\]
       - Passed
       - 'panic: test timed out after'
   server2:
     - or:
       - serverID:2
+      - server 2
+      - start1\(2\)
+      - crash1\(2\)
+      - connect\(2\)
+      - disconnect\(2\)
       - \[Test\]
       - Passed
       - 'panic: test timed out after'
   server3:
     - or:
       - serverID:3
+      - server 3
+      - start1\(3\)
+      - crash1\(3\)
+      - connect\(3\)
+      - disconnect\(3\)
       - \[Test\]
       - Passed
       - 'panic: test timed out after'
   server4:
     - or:
       - serverID:4
+      - server 4
+      - start1\(4\)
+      - crash1\(4\)
+      - connect\(4\)
+      - disconnect\(4\)
       - \[Test\]
       - Passed
       - 'panic: test timed out after'
@@ -36,7 +60,9 @@ pipelines:
       - connect\([0-9]+\)
       - disconnect\([0-9]+\)
       - one\([0-9]+\)
-      - Start\([0-9]+\)
+      - nCommitted\([0-9]+\)
+      - checkOneLeader\([0-9]+\)
+#      - Start\([0-9]+\)
       - \[Test\]
       - Passed
       - 'panic: test timed out after'
@@ -56,86 +82,183 @@ pipelines:
       - one\([0-9]+\)
       - Passed
       - 'panic: test timed out after'
-  committed:
+  snapshot:
     - or:
-      - received commitIndex
-      - commitIndex updated to
-      - update commitIndex to
-      - \[Test\]
-  committed-term-84:
+      - flow:Snapshot
+      - start[0-9]+\([0-9]+\)
+      - crash[0-9]+\([0-9]+\)
+      - connect\([0-9]+\)
+      - disconnect\([0-9]+\)
+      - one\([0-9]+\)
+      - Passed
+      - 'panic: test timed out after'
+  replicated-log:
+    - or:
+      - replicated log to
+  committed-server-0:
     - or:
         - received commitIndex
         - commitIndex updated to
         - update commitIndex to
+    - or:
+        - serverID:0
+  committed-server-1:
+    - or:
+        - received commitIndex
+        - commitIndex updated to
+        - update commitIndex to
+    - or:
+        - serverID:1
+  committed-server-2:
+    - or:
+        - received commitIndex
+        - commitIndex updated to
+        - update commitIndex to
+    - or:
+        - serverID:2
+  applied-server-0:
+    - or:
+        - \] applying log entry [0-9:]+
+        - finish applying log entries
+        - finish applying snapshot
+        - 'finish applying snapshot: lastAppliedIndex='
         - \[Test\]
     - or:
-        - term:84
-  applied:
+        - serverID:0
+  applied-server-1:
     - or:
-      - received commitIndex
-      - applying log entry [0-9:]+ \[LogEntry Command:5038,
-      - lastAppliedIndex=
-      - \[Test\]
-  term-84:
+        - \] applying log entry [0-9:]+
+        - finish applying log entries
+        - finish applying snapshot
+        - 'finish applying snapshot: lastAppliedIndex='
+        - \[Test\]
     - or:
-      - term:84
-      - start[0-9]+\([0-9]+\)
-      - crash[0-9]+\([0-9]+\)
-      - connect\([0-9]+\)
-      - disconnect\([0-9]+\)
-      - one\([0-9]+\)
-      - \[Network\]
-      - Passed
-      - 'panic:'
-  msg-251-and-282:
+        - serverID:1
+  applied-server-2:
     - or:
-      - sender:3 receiver:2 messageID:251
-      - sender:2 receiver:3 messageID:251
-      - sender:3 receiver:2 messageID:282
-      - sender:2 receiver:3 messageID:282
-      - start[0-9]+\([0-9]+\)
-      - crash[0-9]+\([0-9]+\)
-      - connect\([0-9]+\)
-      - disconnect\([0-9]+\)
-      - one\([0-9]+\)
-      - \[Network\]\[(true|false)\] {MessageID:251
-      - \[Network\]\[(true|false)\] {MessageID:282
-  append-entry-2:
+        - \] applying log entry [0-9:]+
+        - finish applying log entries
+        - finish applying snapshot
+        - 'finish applying snapshot: lastAppliedIndex='
+        - \[Test\]
     - or:
-      - enter replicateLogToOnePeer 2
-      - canceled, exit replicateLogToOnePeer for 2
-      - onNewCommandIndexCh closed, exit replicateLogToOnePeer for 2
-      - canceled, exit replicateLogToOnePeer for 2
-      - 'command index outdated, skipping: peer=2, commandIndex=\d+, endOfLog=\d+'
-      - sender:3 receiver:2 messageID:182
-      - sender:3 receiver:2 messageID:184
-      - sender:3 receiver:2 messageID:185
-      - sender:3 receiver:2 messageID:213
-      - sender:3 receiver:2 messageID:251
-      - sender:3 receiver:2 messageID:282
-      - sender:3 receiver:2 messageID:303
-      - sender:3 receiver:2 messageID:304
-      - sender:3 receiver:2 messageID:334
-      - sender:2 receiver:3 messageID:182
-      - sender:2 receiver:3 messageID:184
-      - sender:2 receiver:3 messageID:185
-      - sender:2 receiver:3 messageID:213
-      - sender:2 receiver:3 messageID:251
-      - sender:2 receiver:3 messageID:282
-      - sender:2 receiver:3 messageID:303
-      - sender:2 receiver:3 messageID:304
-      - sender:2 receiver:3 messageID:334
-      - \[Network\]\[(true|false)\] {MessageID:\d+ SenderID:3 ReceiverID:2}
-      - \[Network\]\[(true|false)\] {MessageID:\d+ SenderID:2 ReceiverID:3}
-      - append new log entry
-      - Start\(54\)
+        - serverID:2
+  snapshot-server-0:
     - or:
-      - term:84
-      - \[Network\]
-  server-3-term-84:
+        - flow:Snapshot
     - or:
-      - serverID:3
+        - serverID:0
+  snapshot-server-1:
     - or:
-      - term:84
+        - flow:Snapshot
     - or:
-      - flow:LogReplication
+        - serverID:1
+  snapshot-server-2:
+    - or:
+        - flow:Snapshot
+    - or:
+        - serverID:2
+  log-replication-0:
+    - or:
+        - flow:LogReplication
+        - flow:Commit
+    - or:
+        - serverID:0
+  log-replication-1:
+    - or:
+        - flow:LogReplication
+        - flow:Commit
+    - or:
+        - serverID:1
+  log-replication-2:
+    - or:
+        - flow:LogReplication
+        - flow:Commit
+    - or:
+        - serverID:2
+#  traces:
+#    - or:
+#        - trace:\(1/287\)
+#        - trace:\(1/284\)
+#        - trace:\(0/382\)
+#  trace-1-287:
+#    - or:
+#        - trace:\(1/287\)
+#  trace-1-284:
+#    - or:
+#        - trace:\(1/284\)
+#  trace-0-382:
+#    - or:
+#        - trace:\(0/382\)
+#  trace-0-283:
+#    - or:
+#        - trace:\(0/283\)
+  trace-0-891:
+    - or:
+        - trace:\(0/891\)
+#  term-84:
+#    - or:
+#      - term:84
+#      - start[0-9]+\([0-9]+\)
+#      - crash[0-9]+\([0-9]+\)
+#      - connect\([0-9]+\)
+#      - disconnect\([0-9]+\)
+#      - one\([0-9]+\)
+#      - \[Network\]
+#      - Passed
+#      - 'panic:'
+#  msg-19:
+#    - or:
+#      - sender:2 receiver:1 messageID:19\]
+#      - sender:1 receiver:2 messageID:19\]
+#      - start[0-9]+\([0-9]+\)
+#      - crash[0-9]+\([0-9]+\)
+#      - connect\([0-9]+\)
+#      - disconnect\([0-9]+\)
+#      - one\([0-9]+\)
+#      - '\[Network\]\[(true|false)\] {MessageID:491 SenderID:0 ReceiverID:1'
+#      - '\[Network\]\[(true|false)\] {MessageID:491 SenderID:1 ReceiverID:0'
+#  apply-cancel-149:
+#    - or:
+#      - 'applyCommittedLogEntries:149:'
+#    - or:
+#      - serverID:0
+#  append-entry-2:
+#    - or:
+#      - enter replicateLogToOnePeer 2
+#      - canceled, exit replicateLogToOnePeer for 2
+#      - onNewCommandIndexCh closed, exit replicateLogToOnePeer for 2
+#      - canceled, exit replicateLogToOnePeer for 2
+#      - 'command index outdated, skipping: peer=2, commandIndex=\d+, endOfLog=\d+'
+#      - sender:3 receiver:2 messageID:182
+#      - sender:3 receiver:2 messageID:184
+#      - sender:3 receiver:2 messageID:185
+#      - sender:3 receiver:2 messageID:213
+#      - sender:3 receiver:2 messageID:251
+#      - sender:3 receiver:2 messageID:282
+#      - sender:3 receiver:2 messageID:303
+#      - sender:3 receiver:2 messageID:304
+#      - sender:3 receiver:2 messageID:334
+#      - sender:2 receiver:3 messageID:182
+#      - sender:2 receiver:3 messageID:184
+#      - sender:2 receiver:3 messageID:185
+#      - sender:2 receiver:3 messageID:213
+#      - sender:2 receiver:3 messageID:251
+#      - sender:2 receiver:3 messageID:282
+#      - sender:2 receiver:3 messageID:303
+#      - sender:2 receiver:3 messageID:304
+#      - sender:2 receiver:3 messageID:334
+#      - \[Network\]\[(true|false)\] {MessageID:\d+ SenderID:3 ReceiverID:2}
+#      - \[Network\]\[(true|false)\] {MessageID:\d+ SenderID:2 ReceiverID:3}
+#      - append new log entry
+#      - Start\(54\)
+#    - or:
+#      - term:84
+#      - \[Network\]
+#  server-3-term-84:
+#    - or:
+#      - serverID:3
+#    - or:
+#      - term:84
+#    - or:
+#      - flow:LogReplication

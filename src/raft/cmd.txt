@@ -1,8 +1,8 @@
-go run tool/*.go filter -c raft/.analyze.yaml -o raft/logs/analyze/output -e log -i raft/logs/analyze/TestReElection2A_7034.log
-go run tool/*.go stats -o raft/logs/analyze/stats-3.txt -i raft/logs/running/TestFigure8Unreliable2C_3.log
-go run tool/*.go state -o raft/logs/analyze/output/state.log -i raft/logs/running/TestFigure8Unreliable2C_4106.log
+go run analyze/*.go filter -c raft/.analyze.yaml -o raft/logs/analyze/output -e log -i raft/logs/analyze/TestReElection2A_7034.log
+go run analyze/*.go stats -o raft/logs/analyze/stats-3.txt -i raft/logs/running/TestFigure8Unreliable2C_3.log
+go run analyze/*.go state -o raft/logs/analyze/output/state.log -i raft/logs/running/TestFigure8Unreliable2C_4106.log
 
-rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 0s --iter 2000 TestInitialElection2A TestReElection2A TestManyElections2A
+rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 30s --iter 2000 TestInitialElection2A TestReElection2A TestManyElections2A
 
 rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 30s --iter 2000 TestBasicAgree2B TestRPCBytes2B TestFollowerFailure2B TestLeaderFailure2B TestFailAgree2B TestFailNoAgree2B TestConcurrentStarts2B TestRejoin2B TestBackup2B TestCount2B
 
@@ -12,4 +12,4 @@ rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --time
 
 rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 80s --iter 2000 TestPersist12C TestPersist22C TestPersist32C TestFigure82C TestUnreliableAgree2C TestFigure8Unreliable2C
 
-rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 80s --iter 10000 TestFigure8Unreliable2C
+rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 100s --iter 10000 TestSnapshotBasic2D TestSnapshotInstall2D TestSnapshotInstallUnreliable2D TestSnapshotInstallCrash2D TestSnapshotInstallUnCrash2D TestSnapshotAllCrash2D TestSnapshotInit2D

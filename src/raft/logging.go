@@ -5,6 +5,8 @@ import (
 	"log"
 	"path/filepath"
 	"runtime"
+
+	"6.5840/telemetry"
 )
 
 func init() {
@@ -69,18 +71,17 @@ var visibleFlows = map[Flow]bool{
 }
 
 type LogContext struct {
-	ServerID      int
-	Role          Role
-	Term          int
-	Flow          Flow
-	NumGoroutines int
+	ServerID int
+	Role     Role
+	Term     int
+	Flow     Flow
+	Trace    *telemetry.Trace
 }
 
 type MessageContext struct {
 	LogContext
 	SenderID   int
 	ReceiverID int
-	MessageID  uint64
 }
 
 func Log(ct LogContext, level LogLevel, format string, objs ...interface{}) {
@@ -100,14 +101,15 @@ func LogAndSkipCallers(ct LogContext, level LogLevel, skipCallers int, format st
 	_, filePath, lineNum, _ := runtime.Caller(skipCallers + 1)
 	_, fileName := filepath.Split(filePath)
 
-	log.Printf("%v:%v [serverID:%v role:%v term:%v flow:%v goroutines:%v] %v\n",
+	log.Printf("%v:%v [serverID:%v role:%v term:%v flow:%v trace:(%v) goroutines:%v] %v\n",
 		fileName,
 		lineNum,
 		ct.ServerID,
 		ct.Role,
 		ct.Term,
 		ct.Flow,
-		ct.NumGoroutines,
+		fmtPtr(ct.Trace),
+		runtime.NumGoroutine(),
 		fmt.Sprintf(format, objs...))
 }
 
@@ -128,16 +130,16 @@ func MessageAndSkipCallers(ct MessageContext, level LogLevel, skipCallers int, f
 	_, filePath, lineNum, _ := runtime.Caller(skipCallers + 1)
 	_, fileName := filepath.Split(filePath)
 
-	log.Printf("%v:%v [serverID:%v role:%v term:%v flow:%v goroutines:%v sender:%v receiver:%v messageID:%v] %v\n",
+	log.Printf("%v:%v [serverID:%v role:%v term:%v flow:%v trace:(%v) goroutines:%v sender:%v receiver:%v] %v\n",
 		fileName,
 		lineNum,
 		ct.ServerID,
 		ct.Role,
 		ct.Term,
 		ct.Flow,
-		ct.NumGoroutines,
+		fmtPtr(ct.Trace),
+		runtime.NumGoroutine(),
 		ct.SenderID,
 		ct.ReceiverID,
-		ct.MessageID,
 		fmt.Sprintf(format, objs...))
 }

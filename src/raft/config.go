@@ -116,6 +116,10 @@ func (cfg *config) crash1(i int) {
 		fmt.Printf("crash1(%d)\n", i)
 	}
 
+	cfg.crash1Internal(i)
+}
+
+func (cfg *config) crash1Internal(i int) {
 	cfg.disconnect(i)
 	cfg.net.DeleteServer(i) // disable client connections to the server.
 
@@ -260,7 +264,11 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 					xlog = append(xlog, cfg.logs[i][j])
 				}
 				e.Encode(xlog)
-				fmt.Printf("take snapshot for server %v: lastIncludedLogIndex:=%v\n, commitedLogs=%v\n", i, m.CommandIndex, cfg.logs[i])
+
+				if printConfigDebugLog {
+					fmt.Printf("take snapshot for server %v: lastIncludedLogIndex:=%v, commitedLogs=%v\n", i, m.CommandIndex, cfg.logs[i])
+				}
+
 				rf.Snapshot(m.CommandIndex, w.Bytes())
 			}
 		} else {
@@ -285,7 +293,7 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 		fmt.Printf("start1(%d)\n", i)
 	}
 
-	cfg.crash1(i)
+	cfg.crash1Internal(i)
 
 	// a fresh set of outgoing ClientEnd names.
 	// so that old crashed instance's ClientEnds can't send.

@@ -1204,11 +1204,33 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 		if disconnect {
 			cfg.disconnect(victim)
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("4", 20))
+			}
+
 			cfg.one(rand.Int(), servers-1, true)
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("5", 20))
+			}
 		}
 		if crash {
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("6", 20))
+			}
+
 			cfg.crash1(victim)
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("7", 20))
+			}
+
 			cfg.one(rand.Int(), servers-1, true)
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("8", 20))
+			}
 		}
 
 		// perhaps send enough to get a snapshot
@@ -1223,8 +1245,16 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// an InstallSnapshot RPC isn't required for
 			// TestSnapshotBasic2D().
 			cfg.one(rand.Int(), servers, true)
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("9", 20))
+			}
 		} else {
 			cfg.one(rand.Int(), servers-1, true)
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("A", 20))
+			}
 		}
 
 		if cfg.LogSize() >= MAXLOGSIZE {
@@ -1235,13 +1265,31 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// needs to rceive a snapshot to catch up.
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("B", 20))
+			}
+
 			leader1 = cfg.checkOneLeader()
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("C", 20))
+			}
 		}
 		if crash {
 			cfg.start1(victim, cfg.applierSnap)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("D", 20))
+			}
+
 			leader1 = cfg.checkOneLeader()
+
+			if printTestDebugLog {
+				fmt.Printf("[Test] [%v] %v\n", i, strings.Repeat("E", 20))
+			}
 		}
 	}
 	cfg.end()

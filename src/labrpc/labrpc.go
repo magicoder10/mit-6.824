@@ -61,14 +61,24 @@ import (
 	"time"
 
 	"6.5840/labgob"
+	"6.5840/telemetry"
 )
 
-const printDebugLog = false
+const printDebugLog = true
 
 type MessageContext struct {
-	MessageID  uint64
+	Trace      telemetry.Trace
 	SenderID   int
 	ReceiverID int
+}
+
+var _ fmt.Stringer = (*MessageContext)(nil)
+
+func (m MessageContext) String() string {
+	return fmt.Sprintf("[MessageContext trace:(%v), SenderID:%v, ReceiverID:%v]",
+		m.Trace,
+		m.SenderID,
+		m.ReceiverID)
 }
 
 type reqMsg struct {
@@ -238,7 +248,7 @@ func (rn *Network) processReq(req reqMsg) {
 			ms := (rand.Int() % 27)
 
 			if printDebugLog {
-				fmt.Printf("[Network][%v] %+v short request delay for %vms\n", enabled, req.mt, ms)
+				fmt.Printf("[Network][enabled:%v] %+v short request delay for %vms\n", enabled, req.mt, ms)
 			}
 
 			time.Sleep(time.Duration(ms) * time.Millisecond)
@@ -247,11 +257,15 @@ func (rn *Network) processReq(req reqMsg) {
 		if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the request, return as if timeout
 			if printDebugLog {
-				fmt.Printf("[Network][%v] %+v drop request\n", enabled, req.mt)
+				fmt.Printf("[Network][enabled:%v] %+v drop request\n", enabled, req.mt)
 			}
 
 			req.replyCh <- replyMsg{false, nil}
 			return
+		}
+
+		if reliable && printDebugLog {
+			fmt.Printf("[Network][enabled:%v] %+v send request immediately\n", enabled, req.mt)
 		}
 
 		// execute the request (call the RPC handler).
@@ -293,21 +307,21 @@ func (rn *Network) processReq(req reqMsg) {
 		serverDead = rn.isServerDead(req.endname, servername, server)
 
 		replyMt := MessageContext{
-			MessageID:  req.mt.MessageID,
+			Trace:      req.mt.Trace,
 			SenderID:   req.mt.ReceiverID,
 			ReceiverID: req.mt.SenderID,
 		}
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
 			if printDebugLog {
-				fmt.Printf("[Network][%v] %+v server dead while waiting for reply\n", enabled, replyMt)
+				fmt.Printf("[Network][enabled:%v] %+v server dead while waiting for reply\n", enabled, replyMt)
 			}
 
 			req.replyCh <- replyMsg{false, nil}
 		} else if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the reply, return as if timeout
 			if printDebugLog {
-				fmt.Printf("[Network][%v] %+v drop reply\n", enabled, replyMt)
+				fmt.Printf("[Network][enabled:%v] %+v drop reply\n", enabled, replyMt)
 			}
 
 			req.replyCh <- replyMsg{false, nil}
@@ -318,7 +332,7 @@ func (rn *Network) processReq(req reqMsg) {
 			// the number of goroutines, so that the race
 			// detector is less likely to get upset.
 			if printDebugLog {
-				fmt.Printf("[Network][%v] %+v long reply delay for %vms\n", enabled, replyMt, ms)
+				fmt.Printf("[Network][enabled:%v] %+v long reply delay for %vms\n", enabled, replyMt, ms)
 			}
 
 			time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
@@ -327,7 +341,7 @@ func (rn *Network) processReq(req reqMsg) {
 			})
 		} else {
 			if printDebugLog {
-				fmt.Printf("[Network][%v] %+v received reply immediately\n", enabled, replyMt)
+				fmt.Printf("[Network][enabled:%v] %+v received reply immediately\n", enabled, replyMt)
 			}
 
 			atomic.AddInt64(&rn.bytes, int64(len(reply.reply)))
@@ -342,7 +356,7 @@ func (rn *Network) processReq(req reqMsg) {
 			ms = (rand.Int() % 7000)
 
 			if printDebugLog {
-				fmt.Printf("[Network][%v] %+v long request delay for %vms\n", enabled, req.mt, ms)
+				fmt.Printf("[Network][enabled:%v] %+v long request delay for %vms\n", enabled, req.mt, ms)
 			}
 		} else {
 			// many kv tests require the client to try each
@@ -350,7 +364,7 @@ func (rn *Network) processReq(req reqMsg) {
 			ms = (rand.Int() % 100)
 
 			if printDebugLog {
-				fmt.Printf("[Network][%v] %+v short request delay for %vms\n", enabled, req.mt, ms)
+				fmt.Printf("[Network][enabled:%v] %+v short request delay for %vms\n", enabled, req.mt, ms)
 			}
 		}
 		time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
