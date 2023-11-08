@@ -22,7 +22,7 @@ import (
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-const printTestDebugLog = true
+const printTestDebugLog = false
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3

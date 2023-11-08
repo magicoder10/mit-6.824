@@ -14,12 +14,12 @@ import (
 	"6.5840/labrpc"
 )
 
-const heartBeatInterval = 120 * time.Millisecond
+const heartBeatInterval = 150 * time.Millisecond
 const electionBaseTimeOut = 400 * time.Millisecond
 const electionRandomTimeOutFactor = 7
 const electionRandomTimeOutMultiplier = 20 * time.Millisecond
 
-const requestTimeOut = 120 * time.Millisecond
+const requestTimeOut = 150 * time.Millisecond
 
 type Role string
 
@@ -149,6 +149,7 @@ func (rf *Raft) Snapshot(snapshotLastIncludedIndex int, snapshotData []byte) {
 		LastIncludedTerm:  rf.logTerm(snapshotLastIncludedIndex),
 		Data:              snapshotData,
 	}
+
 	rf.useSnapshot(trace, snapshot)
 }
 
@@ -331,9 +332,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	Log(
 		rf.logContext(args.Trace, LogReplicationFlow),
 		InfoLevel,
-		"before appendEntries from %v: commitIndex=%v, log=%v",
+		"before appendEntries from %v: commitIndex=%v, snapshot=%v, log=%v",
 		args.LeaderID,
 		rf.commitIndex,
+		rf.snapshot,
 		rf.logEntries)
 
 	logLastIndex := rf.logLastIndex()
@@ -523,6 +525,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			Value: FollowerRole,
 		}
 		rf.runAsFollower(args.Trace)
+	}
+
+	if args.LastIncludedIndex <= rf.snapshot.Value.LastIncludedIndex {
+		Log(rf.logContext(args.Trace, SnapshotFlow), InfoLevel, "snapshot already up to date, exit Snapshot")
+		return
 	}
 
 	snapshot := Snapshot{
@@ -2085,7 +2092,7 @@ func (rf *Raft) persist(trace telemetry.Trace, flow Flow) {
 		Log(rf.logContext(trace, flow), ErrorLevel, "failed to encode snapshotLastIncludedIndex: %v", err)
 	}
 
-	err = encoder.Encode(rf.snapshot.Value.LastIncludedIndex)
+	err = encoder.Encode(rf.snapshot.Value.LastIncludedTerm)
 	if err != nil {
 		Log(rf.logContext(trace, flow), ErrorLevel, "failed to encode snapshotLastIncludedTerm: %v", err)
 	}

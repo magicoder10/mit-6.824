@@ -166,36 +166,34 @@ pipelines:
         - serverID:0
   log-replication-1:
     - or:
+        - start1\([0-9]+\)
+        - crash1\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
         - flow:LogReplication
         - flow:Commit
     - or:
         - serverID:1
+        - start1\([0-9]+\)
+        - crash1\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
   log-replication-2:
     - or:
         - flow:LogReplication
         - flow:Commit
     - or:
         - serverID:2
-#  traces:
-#    - or:
-#        - trace:\(1/287\)
-#        - trace:\(1/284\)
-#        - trace:\(0/382\)
-#  trace-1-287:
-#    - or:
-#        - trace:\(1/287\)
-#  trace-1-284:
-#    - or:
-#        - trace:\(1/284\)
-#  trace-0-382:
-#    - or:
-#        - trace:\(0/382\)
-#  trace-0-283:
-#    - or:
-#        - trace:\(0/283\)
-  trace-0-891:
+  trace-1-112:
     - or:
-        - trace:\(0/891\)
+        - trace:\(1/112\)
+  replicate-to-2:
+    - or:
+        - start new replicateLogToOnePeer loop for 0
+    - or:
+        - serverID:2
+    - or:
+        - term:4
 #  term-84:
 #    - or:
 #      - term:84
