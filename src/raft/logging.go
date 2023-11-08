@@ -52,7 +52,7 @@ var logLevelRank = map[LogLevel]int{
 	OffLevel:   5,
 }
 
-const visibleLogLevel LogLevel = OffLevel
+const visibleLogLevel LogLevel = InfoLevel
 
 var visibleFlows = map[Flow]bool{
 	FollowerFlow:       true,

@@ -26,7 +26,7 @@ import (
 	"6.5840/labrpc"
 )
 
-const printConfigDebugLog = false
+const printConfigDebugLog = true
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
