@@ -1111,7 +1111,6 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 	cfg.begin(name)
 	cfg.one(rand.Int(), servers, true)
-
 	leader1 := cfg.checkOneLeader()
 
 	for i := 0; i < iters; i++ {
