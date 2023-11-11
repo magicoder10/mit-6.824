@@ -1,100 +1,100 @@
 pipelines:
   server0:
     - or:
-      - serverID:0
-      - server 0
-      - start1\(0\)
-      - crash1\(0\)
-      - connect\(0\)
-      - disconnect\(0\)
-      - \[Test\]
-      - Passed
-      - 'panic: test timed out after'
+        - serverID:0
+        - server 0
+        - start1\(0\)
+        - crash1\(0\)
+        - connect\(0\)
+        - disconnect\(0\)
+        - \[Test\]
+        - Passed
+        - 'panic: test timed out after'
   server1:
     - or:
-      - serverID:1
-      - start1\(1\)
-      - crash1\(1\)
-      - connect\(1\)
-      - disconnect\(1\)
-      - \[Test\]
-      - Passed
-      - 'panic: test timed out after'
+        - serverID:1
+        - start1\(1\)
+        - crash1\(1\)
+        - connect\(1\)
+        - disconnect\(1\)
+        - \[Test\]
+        - Passed
+        - 'panic: test timed out after'
   server2:
     - or:
-      - serverID:2
-      - server 2
-      - start1\(2\)
-      - crash1\(2\)
-      - connect\(2\)
-      - disconnect\(2\)
-      - \[Test\]
-      - Passed
-      - 'panic: test timed out after'
+        - serverID:2
+        - server 2
+        - start1\(2\)
+        - crash1\(2\)
+        - connect\(2\)
+        - disconnect\(2\)
+        - \[Test\]
+        - Passed
+        - 'panic: test timed out after'
   server3:
     - or:
-      - serverID:3
-      - server 3
-      - start1\(3\)
-      - crash1\(3\)
-      - connect\(3\)
-      - disconnect\(3\)
-      - \[Test\]
-      - Passed
-      - 'panic: test timed out after'
+        - serverID:3
+        - server 3
+        - start1\(3\)
+        - crash1\(3\)
+        - connect\(3\)
+        - disconnect\(3\)
+        - \[Test\]
+        - Passed
+        - 'panic: test timed out after'
   server4:
     - or:
-      - serverID:4
-      - server 4
-      - start1\(4\)
-      - crash1\(4\)
-      - connect\(4\)
-      - disconnect\(4\)
-      - \[Test\]
-      - Passed
-      - 'panic: test timed out after'
+        - serverID:4
+        - server 4
+        - start1\(4\)
+        - crash1\(4\)
+        - connect\(4\)
+        - disconnect\(4\)
+        - \[Test\]
+        - Passed
+        - 'panic: test timed out after'
   test:
     - or:
-      - start[0-9]+\([0-9]+\)
-      - crash[0-9]+\([0-9]+\)
-      - connect\([0-9]+\)
-      - disconnect\([0-9]+\)
-      - one\([0-9]+\)
-      - nCommitted\([0-9]+\)
-      - checkOneLeader\([0-9]+\)
-#      - Start\([0-9]+\)
-      - \[Test\]
-      - Passed
-      - 'panic: test timed out after'
+        - start[0-9]+\([0-9]+\)
+        - crash[0-9]+\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
+        - one\([0-9]+\)
+        - nCommitted\([0-9]+\)
+        - checkOneLeader\([0-9]+\)
+        #      - Start\([0-9]+\)
+        - \[Test\]
+        - Passed
+        - 'panic: test timed out after'
   kill:
     - or:
-      - Kill enter
-      - Kill exit
-      - flow:Termination
-      - 'panic: test timed out after'
+        - Kill enter
+        - Kill exit
+        - flow:Termination
+        - 'panic: test timed out after'
   leader:
     - or:
-      - role:Leader
-      - start[0-9]+\([0-9]+\)
-      - crash[0-9]+\([0-9]+\)
-      - connect\([0-9]+\)
-      - disconnect\([0-9]+\)
-      - one\([0-9]+\)
-      - Passed
-      - 'panic: test timed out after'
+        - role:Leader
+        - start[0-9]+\([0-9]+\)
+        - crash[0-9]+\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
+        - one\([0-9]+\)
+        - Passed
+        - 'panic: test timed out after'
   snapshot:
     - or:
-      - flow:Snapshot
-      - start[0-9]+\([0-9]+\)
-      - crash[0-9]+\([0-9]+\)
-      - connect\([0-9]+\)
-      - disconnect\([0-9]+\)
-      - one\([0-9]+\)
-      - Passed
-      - 'panic: test timed out after'
+        - flow:Snapshot
+        - start[0-9]+\([0-9]+\)
+        - crash[0-9]+\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
+        - one\([0-9]+\)
+        - Passed
+        - 'panic: test timed out after'
   replicated-log:
     - or:
-      - replicated log to
+        - replicated log to
   committed-server-0:
     - or:
         - received commitIndex
@@ -194,6 +194,12 @@ pipelines:
         - serverID:2
     - or:
         - term:4
+  traces:
+    - or:
+        - trace:\(2/499\)
+        - trace:\(1/399\)
+        - trace:\(2/460\)
+        - trace:\(2/504\)
 #  term-84:
 #    - or:
 #      - term:84

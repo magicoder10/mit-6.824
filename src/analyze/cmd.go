@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -32,11 +33,36 @@ var rootCmd = &cobra.Command{
 	Short: "analyze log",
 }
 
+var allCmd = &cobra.Command{
+	Use:   "all",
+	Short: "perform all analysis",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		os.RemoveAll(outputDir)
+
+		err := filterLines(configFilePath, inputFilePath, path.Join(outputDir, "log"), "log")
+		if err != nil {
+			return err
+		}
+
+		err = calcStats(inputFilePath, filepath.Join(outputDir, "stats.txt"))
+		if err != nil {
+			return err
+		}
+
+		err = calcState(inputFilePath, filepath.Join(outputDir, "state"))
+		if err != nil {
+			return err
+		}
+
+		return nil
+	},
+}
+
 var filterCmd = &cobra.Command{
 	Use:   "filter",
 	Short: "filtering lines",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return filterLines(configFilePath, inputFilePath, outputDir)
+		return filterLines(configFilePath, inputFilePath, outputDir, outputFileExt)
 	},
 }
 
@@ -52,7 +78,7 @@ var stateCmd = &cobra.Command{
 	Use:   "state",
 	Short: "calculate state",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return calcState(inputFilePath, outputFilePath)
+		return calcState(inputFilePath, outputDir)
 	},
 }
 
@@ -91,8 +117,22 @@ func main() {
 		return
 	}
 
-	stateCmd.PersistentFlags().StringVarP(&outputFilePath, "outputFilePath", "o", "", "output file path")
-	err = stateCmd.MarkPersistentFlagRequired("outputFilePath")
+	stateCmd.PersistentFlags().StringVarP(&outputDir, "outputDir", "o", "", "output directory")
+	err = stateCmd.MarkPersistentFlagRequired("outputDir")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	allCmd.PersistentFlags().StringVarP(&configFilePath, "config", "c", "", "config file path")
+	err = allCmd.MarkPersistentFlagRequired("config")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	allCmd.PersistentFlags().StringVarP(&outputDir, "outputDir", "o", "", "output directory")
+	err = allCmd.MarkPersistentFlagRequired("outputDir")
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -101,10 +141,11 @@ func main() {
 	rootCmd.AddCommand(filterCmd)
 	rootCmd.AddCommand(statsCmd)
 	rootCmd.AddCommand(stateCmd)
+	rootCmd.AddCommand(allCmd)
 	err = rootCmd.Execute()
 }
 
-func filterLines(filterFilePath string, inputFilePath string, outputDir string) error {
+func filterLines(filterFilePath string, inputFilePath string, outputDir string, outputFileExt string) error {
 	buf, err := os.ReadFile(filterFilePath)
 	if err != nil {
 		return err
@@ -135,8 +176,8 @@ func filterLines(filterFilePath string, inputFilePath string, outputDir string) 
 		go func(pipelineName string, pipeline Pipeline) {
 			defer wg.Done()
 			defer fmt.Printf("pipeline (%s) done\n", pipelineName)
-			outputFilePath := filepath.Join(outputDir, fmt.Sprintf("%s.%s", pipelineName, outputFileExt))
-			outputFile, err := os.OpenFile(outputFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+			pipelineOutputFilePath := filepath.Join(outputDir, fmt.Sprintf("%s.%s", pipelineName, outputFileExt))
+			outputFile, err := os.OpenFile(pipelineOutputFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 			if err != nil {
 				fmt.Println(err)
 				return
@@ -262,6 +303,10 @@ func calcStats(inputFilePath string, outputFilePath string) error {
 	}
 
 	_, err = fmt.Fprintf(outputFile, "%s\n", buf)
+	if err == nil {
+		fmt.Println("generated stats")
+	}
+
 	return err
 }
 
@@ -346,7 +391,7 @@ func parseTaskCount(input string) (TaskCount, error) {
 	}, nil
 }
 
-func calcState(inputFilePath string, outputFilePath string) error {
+func calcState(inputFilePath string, outputDir string) error {
 	inputFile, err := os.Open(inputFilePath)
 	if err != nil {
 		return err
@@ -354,27 +399,45 @@ func calcState(inputFilePath string, outputFilePath string) error {
 
 	defer inputFile.Close()
 
-	outputFile, err := os.OpenFile(outputFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	err = os.MkdirAll(outputDir, 0755)
 	if err != nil {
 		return err
 	}
 
-	defer outputFile.Close()
-
-	state := State{
-		Network: map[int]ConnectionState{},
+	networkOutputFile, err := os.OpenFile(filepath.Join(outputDir, "network.txt"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
 	}
 
+	defer networkOutputFile.Close()
+
+	serversOutputFile, err := os.OpenFile(filepath.Join(outputDir, "servers.txt"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	defer serversOutputFile.Close()
+
+	state := newState()
 	lineNumber := 1
 	scanner := bufio.NewScanner(inputFile)
 	for scanner.Scan() {
 		line := scanner.Text()
 		isUpdated := updateNetworkState(&state, line)
 		if isUpdated {
-			_, err = fmt.Fprintf(outputFile, "%d  %s state=%+v\n", lineNumber, line, state)
+			_, err = fmt.Fprintf(networkOutputFile, "%d  %s %+v\n", lineNumber, line, state.Network)
+		}
+
+		isUpdated = updateServerState(&state, line)
+		if isUpdated {
+			_, err = fmt.Fprintf(serversOutputFile, "%d  %s %+v\n", lineNumber, line, state.Servers)
 		}
 
 		lineNumber++
+	}
+
+	if err == nil {
+		fmt.Println("generated state")
 	}
 
 	return err
@@ -398,6 +461,30 @@ func updateNetworkState(state *State, line string) bool {
 
 	if match {
 		state.Network[disconnect.ServerID] = DisconnectedConnectionState
+		return true
+	}
+
+	return false
+}
+
+func updateServerState(state *State, line string) bool {
+	start, match, err := parseStart(line)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	if match {
+		state.Servers[start.ServerID] = UpServerState
+		return true
+	}
+
+	crash, match, err := parseCrash(line)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	if match {
+		state.Servers[crash.ServerID] = DownServerState
 		return true
 	}
 
@@ -432,6 +519,38 @@ func parseDisconnect(input string) (Disconnect, bool, error) {
 	}
 
 	return Disconnect{
+		ServerID: int(serverID),
+	}, true, nil
+}
+
+func parseStart(input string) (Start, bool, error) {
+	groups := startPattern.FindStringSubmatch(input)
+	if len(groups) != 2 {
+		return Start{}, false, nil
+	}
+
+	serverID, err := strconv.ParseInt(groups[1], 10, 64)
+	if err != nil {
+		return Start{}, false, err
+	}
+
+	return Start{
+		ServerID: int(serverID),
+	}, true, nil
+}
+
+func parseCrash(input string) (Crash, bool, error) {
+	groups := crashPattern.FindStringSubmatch(input)
+	if len(groups) != 2 {
+		return Crash{}, false, nil
+	}
+
+	serverID, err := strconv.ParseInt(groups[1], 10, 64)
+	if err != nil {
+		return Crash{}, false, err
+	}
+
+	return Crash{
 		ServerID: int(serverID),
 	}, true, nil
 }

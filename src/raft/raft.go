@@ -350,27 +350,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	prevLogTerm := rf.logTerm(args.PrevLogIndex)
-	if args.PrevLogTerm != prevLogTerm {
-		reply.Success = false
-		conflictTerm := prevLogTerm
-		reply.ConflictTerm = &conflictTerm
-		if conflictTerm == rf.snapshot.Value.LastIncludedTerm {
-			reply.ConflictIndex = rf.snapshot.Value.LastIncludedIndex
-		} else {
+	if rf.toRelativeIndex(args.PrevLogIndex) >= 0 {
+		// prevLogIndex is in logEntries
+		prevLogTerm := rf.logTerm(args.PrevLogIndex)
+		if args.PrevLogTerm != prevLogTerm {
+			reply.Success = false
+			conflictTerm := prevLogTerm
+			reply.ConflictTerm = &conflictTerm
 			for index := 0; index < len(rf.logEntries.Value); index++ {
 				if rf.logEntries.Value[index].Term == conflictTerm {
 					reply.ConflictIndex = rf.toAbsoluteLogIndex(index)
 					break
 				}
 			}
-		}
 
-		Log(
-			rf.logContext(args.Trace, LogReplicationFlow),
-			InfoLevel,
-			"prevLogTerm not match, reject AppendEntries: %+v", reply)
-		return
+			Log(
+				rf.logContext(args.Trace, LogReplicationFlow),
+				InfoLevel,
+				"prevLogTerm not match, reject AppendEntries: %+v", reply)
+			return
+		}
 	}
 
 	Log(rf.logContext(args.Trace, LogReplicationFlow), InfoLevel, "before check log entry: snapshot=%v, logEntries=%v",
@@ -380,6 +379,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	remainNewEntries := make([]LogEntry, 0)
 	for index, logEntry := range args.LogEntries {
 		newEntryIndex := args.PrevLogIndex + index + 1
+		newEntryRelativeIndex := rf.toRelativeIndex(newEntryIndex)
+		if newEntryRelativeIndex < 0 {
+			Log(rf.logContext(args.Trace, LogReplicationFlow), InfoLevel, "log entry already in snapshot, skipping: logEntry=%v, snapshot=%v",
+				newEntryIndex, rf.snapshot)
+			continue
+		}
+
 		if newEntryIndex > logLastIndex {
 			Log(
 				rf.logContext(args.Trace, LogReplicationFlow),
@@ -390,7 +396,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 
-		newEntryRelativeIndex := rf.toRelativeIndex(newEntryIndex)
 		Log(rf.logContext(args.Trace, LogReplicationFlow), InfoLevel, "check log entry: logEntry=%v, newEntryRelativeIndex=%v, snapshot=%v",
 			logEntry,
 			newEntryRelativeIndex,
