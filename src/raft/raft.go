@@ -8,10 +8,9 @@ import (
 	"time"
 
 	"6.5840/labgob"
-	"6.5840/telemetry"
-
-	//	"6.5840/labgob"
 	"6.5840/labrpc"
+	"6.5840/signal"
+	"6.5840/telemetry"
 )
 
 const heartBeatInterval = 150 * time.Millisecond
@@ -99,10 +98,10 @@ type Raft struct {
 	applyingSnapshots telemetry.WithTrace[int]
 
 	applyCh                   chan ApplyMsg
-	onNewCommandIndexSignals  []*Signal[telemetry.WithTrace[int]]
-	onNewSnapshotSignal       *Signal[telemetry.WithTrace[WithCancel[Snapshot]]]
-	onMatchIndexChangeSignal  *Signal[telemetry.WithTrace[int]]
-	onCommitIndexChangeSignal *Signal[telemetry.WithTrace[int]]
+	onNewCommandIndexSignals  []*signal.Signal[telemetry.WithTrace[int]]
+	onNewSnapshotSignal       *signal.Signal[telemetry.WithTrace[WithCancel[Snapshot]]]
+	onMatchIndexChangeSignal  *signal.Signal[telemetry.WithTrace[int]]
+	onCommitIndexChangeSignal *signal.Signal[telemetry.WithTrace[int]]
 
 	locks map[uint64]struct{}
 
@@ -2351,13 +2350,13 @@ func Make(
 	persister *Persister,
 	applyCh chan ApplyMsg,
 ) *Raft {
-	onNewCommandIndexSignals := make([]*Signal[telemetry.WithTrace[int]], len(peers))
+	onNewCommandIndexSignals := make([]*signal.Signal[telemetry.WithTrace[int]], len(peers))
 	for peerServerIndex := 0; peerServerIndex < len(peers); peerServerIndex++ {
 		if peerServerIndex == me {
 			continue
 		}
 
-		onNewCommandIndexSignals[peerServerIndex] = NewSignal[telemetry.WithTrace[int]](1)
+		onNewCommandIndexSignals[peerServerIndex] = signal.NewSignal[telemetry.WithTrace[int]](1)
 	}
 
 	var nextCancelContextId uint64 = 0
@@ -2393,9 +2392,9 @@ func Make(
 		},
 		applyCh:                   applyCh,
 		onNewCommandIndexSignals:  onNewCommandIndexSignals,
-		onNewSnapshotSignal:       NewSignal[telemetry.WithTrace[WithCancel[Snapshot]]](1),
-		onMatchIndexChangeSignal:  NewSignal[telemetry.WithTrace[int]](1),
-		onCommitIndexChangeSignal: NewSignal[telemetry.WithTrace[int]](1),
+		onNewSnapshotSignal:       signal.NewSignal[telemetry.WithTrace[WithCancel[Snapshot]]](1),
+		onMatchIndexChangeSignal:  signal.NewSignal[telemetry.WithTrace[int]](1),
+		onCommitIndexChangeSignal: signal.NewSignal[telemetry.WithTrace[int]](1),
 		locks:                     make(map[uint64]struct{}),
 	}
 
