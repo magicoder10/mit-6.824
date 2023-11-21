@@ -9,16 +9,19 @@ import (
 
 	"6.5840/labgob"
 	"6.5840/labrpc"
+	"6.5840/rpc"
 	"6.5840/signal"
 	"6.5840/telemetry"
 )
 
-const heartBeatInterval = 150 * time.Millisecond
+const heartBeatInterval = 120 * time.Millisecond
 const electionBaseTimeOut = 400 * time.Millisecond
 const electionRandomTimeOutFactor = 7
 const electionRandomTimeOutMultiplier = 20 * time.Millisecond
 
-const requestTimeOut = 150 * time.Millisecond
+const requestTimeOut = 120 * time.Millisecond
+
+const traceNamespace = "raft"
 
 type Role string
 
@@ -68,7 +71,6 @@ type ApplyMsg struct {
 
 	SnapshotValid bool
 	Snapshot      []byte
-	SnapshotTerm  int
 	SnapshotIndex int
 }
 
@@ -103,12 +105,12 @@ type Raft struct {
 	onMatchIndexChangeSignal  *signal.Signal[telemetry.WithTrace[int]]
 	onCommitIndexChangeSignal *signal.Signal[telemetry.WithTrace[int]]
 
-	locks map[uint64]struct{}
-
 	applyEntriesCancelContext  *CancelContext
 	applySnapshotCancelContext *CancelContext
 	roleCancelContext          *CancelContext
 	serverCancelContext        *CancelContext
+	taskTracker                *TaskTracker
+	serverWaitGroup            *sync.WaitGroup
 
 	nextLockID  uint64
 	nextTraceID uint64
@@ -129,7 +131,7 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) Snapshot(snapshotLastIncludedIndex int, snapshotData []byte) {
 	unlocker := rf.lock(SnapshotFlow)
 	defer unlocker.unlock(SnapshotFlow)
-	trace := rf.newTrace(SnapshotFlow)
+	trace := rf.newTrace()
 	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "enter Snapshot: snapshotLastIncludedIndex=%v", snapshotLastIncludedIndex)
 	defer Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "exit Snapshot")
 
@@ -210,8 +212,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
-	logLastTerm := rf.logLastTerm()
-	if args.LastLogTerm < logLastTerm {
+	lastLogTerm := rf.lastLogTerm()
+	if args.LastLogTerm < lastLogTerm {
 		Log(
 			rf.logContext(args.Trace, ElectionFlow),
 			InfoLevel,
@@ -221,16 +223,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if args.LastLogTerm == logLastTerm {
-		logLastIndex := rf.logLastIndex()
-		if args.LastLogIndex < logLastIndex {
+	if args.LastLogTerm == lastLogTerm {
+		lastLogIndex := rf.lastLogIndex()
+		if args.LastLogIndex < lastLogIndex {
 			Log(
 				rf.logContext(args.Trace, ElectionFlow),
 				InfoLevel,
 				"reject vote request from %v because of lower lastLogIndex: candidateLastLogIndex=%v, serverLastLogIndex=%v",
 				args.CandidateID,
 				args.LastLogIndex,
-				logLastIndex,
+				lastLogIndex,
 			)
 			reply.VoteGranted = false
 			return
@@ -337,10 +339,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.snapshot,
 		rf.logEntries)
 
-	logLastIndex := rf.logLastIndex()
-	if args.PrevLogIndex > logLastIndex {
+	lastLogIndex := rf.lastLogIndex()
+	if args.PrevLogIndex > lastLogIndex {
 		reply.Success = false
-		reply.ConflictLogLastIndex = logLastIndex
+		reply.ConflictLogLastIndex = lastLogIndex
 		Log(
 			rf.logContext(args.Trace, LogReplicationFlow),
 			InfoLevel,
@@ -380,12 +382,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		newEntryIndex := args.PrevLogIndex + index + 1
 		newEntryRelativeIndex := rf.toRelativeIndex(newEntryIndex)
 		if newEntryRelativeIndex < 0 {
-			Log(rf.logContext(args.Trace, LogReplicationFlow), InfoLevel, "log entry already in snapshot, skipping: logEntry=%v, snapshot=%v",
+			Log(rf.logContext(args.Trace, LogReplicationFlow), DebugLevel, "log entry already in snapshot, skipping: logEntry=%v, snapshot=%v",
 				newEntryIndex, rf.snapshot)
 			continue
 		}
 
-		if newEntryIndex > logLastIndex {
+		if newEntryIndex > lastLogIndex {
 			Log(
 				rf.logContext(args.Trace, LogReplicationFlow),
 				InfoLevel,
@@ -395,7 +397,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 
-		Log(rf.logContext(args.Trace, LogReplicationFlow), InfoLevel, "check log entry: logEntry=%v, newEntryRelativeIndex=%v, snapshot=%v",
+		Log(rf.logContext(args.Trace, LogReplicationFlow), DebugLevel, "check log entry: logEntry=%v, newEntryRelativeIndex=%v, snapshot=%v",
 			logEntry,
 			newEntryRelativeIndex,
 			rf.snapshot)
@@ -458,7 +460,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				InfoLevel,
 				"update commitIndex to %v",
 				rf.commitIndex)
-			rf.notifyCommitIndexChange(args.Trace, LogReplicationFlow, newCommitIndex)
+			rf.notifyCommitIndexChange(args.Trace, newCommitIndex)
 		}
 	} else {
 		Log(
@@ -564,7 +566,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	unlocker := rf.lock(LogReplicationFlow)
 	defer unlocker.unlock(LogReplicationFlow)
 
-	trace := rf.newTrace(LogReplicationFlow)
+	trace := rf.newTrace()
 	Log(rf.logContext(trace, LogReplicationFlow), InfoLevel, "enter Start")
 	defer Log(rf.logContext(trace, LogReplicationFlow), InfoLevel, "exit Start")
 
@@ -590,7 +592,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.logEntries)
 
 		// start replicating log entries
-		for peerServerID, signal := range rf.onNewCommandIndexSignals {
+		for peerServerID, sig := range rf.onNewCommandIndexSignals {
 			if peerServerID == rf.serverID {
 				continue
 			}
@@ -600,7 +602,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				break
 			}
 
-			signal.Send(telemetry.WithTrace[int]{
+			sig.Send(telemetry.WithTrace[int]{
 				Trace: trace,
 				Value: nextIndex,
 			})
@@ -621,7 +623,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	unlocker := rf.lock(TerminationFlow)
-	trace := rf.newTrace(TerminationFlow)
+	trace := rf.newTrace()
 	Log(rf.logContext(trace, TerminationFlow), InfoLevel, "Kill enter")
 
 	if rf.roleCancelContext != nil {
@@ -631,7 +633,7 @@ func (rf *Raft) Kill() {
 	rf.serverCancelContext.TryCancel(rf.logContext(trace, TerminationFlow))
 	unlocker.unlock(TerminationFlow)
 
-	rf.serverCancelContext.Wait(rf.logContext(trace, TerminationFlow))
+	rf.serverWaitGroup.Wait()
 
 	unlocker = rf.lock(TerminationFlow)
 	defer unlocker.unlock(TerminationFlow)
@@ -645,12 +647,12 @@ func (rf *Raft) Kill() {
 	Log(rf.logContext(trace, TerminationFlow), InfoLevel, "close onMatchIndexChangeCh")
 	rf.onMatchIndexChangeSignal.Close()
 
-	for peerServerID, signal := range rf.onNewCommandIndexSignals {
+	for peerServerID, sig := range rf.onNewCommandIndexSignals {
 		if peerServerID == rf.serverID {
 			continue
 		}
 
-		signal.Close()
+		sig.Close()
 	}
 
 	Log(rf.logContext(trace, TerminationFlow), InfoLevel, "Kill exit")
@@ -667,15 +669,17 @@ func (rf *Raft) runAsFollower(trace telemetry.Trace) {
 		prevRoleCancelContext.TryCancel(rf.logContext(trace, FollowerFlow))
 	}
 
-	finisher := newRoleCancelContext.Add(rf.logContext(trace, FollowerFlow), 1)
+	finisher := rf.taskTracker.Add(rf.logContext(trace, FollowerFlow), 1)
+	rf.serverWaitGroup.Add(1)
 	go func() {
+		defer rf.serverWaitGroup.Done()
 		logUnlocker := rf.lock(FollowerFlow)
 		defer finisher.Done(rf.logContext(trace, FollowerFlow))
 		logUnlocker.unlock(FollowerFlow)
 
 		for {
 			electionTimerUnlocker := rf.lock(FollowerFlow)
-			loopTrace := rf.newTrace(FollowerFlow)
+			loopTrace := rf.newTrace()
 			Log(rf.logContext(trace, FollowerFlow), InfoLevel, "[loop-trace:(%v)] start new election timer loop", loopTrace)
 			if newRoleCancelContext.IsCanceled(rf.logContext(loopTrace, FollowerFlow)) {
 				Log(rf.logContext(loopTrace, FollowerFlow), InfoLevel, "role canceled, exit runAsFollower")
@@ -745,8 +749,10 @@ func (rf *Raft) runAsCandidate(trace telemetry.Trace) {
 	rf.roleCancelContext = newRoleCancelContext
 
 	prevRoleCancelContext.TryCancel(rf.logContext(trace, CandidateFlow))
-	finisher := newRoleCancelContext.Add(rf.logContext(trace, CandidateFlow), 1)
+	finisher := rf.taskTracker.Add(rf.logContext(trace, CandidateFlow), 1)
+	rf.serverWaitGroup.Add(1)
 	go func() {
+		defer rf.serverWaitGroup.Done()
 		unlocker := rf.lock(CandidateFlow)
 		defer finisher.Done(rf.logContext(trace, CandidateFlow))
 
@@ -755,7 +761,7 @@ func (rf *Raft) runAsCandidate(trace telemetry.Trace) {
 
 		for {
 			electionTimerUnlocker := rf.lock(CandidateFlow)
-			loopTrace := rf.newTrace(CandidateFlow)
+			loopTrace := rf.newTrace()
 			Log(rf.logContext(loopTrace, CandidateFlow), InfoLevel, "[loop-trace:(%v)] start new election timer loop", loopTrace)
 
 			if newRoleCancelContext.IsCanceled(rf.logContext(loopTrace, CandidateFlow)) {
@@ -810,11 +816,12 @@ func (rf *Raft) runAsLeader(trace telemetry.Trace) {
 	rf.roleCancelContext = newRoleCancelContext
 
 	prevRoleCancelContext.TryCancel(rf.logContext(trace, LeaderFlow))
-	finisher := newRoleCancelContext.Add(rf.logContext(trace, LeaderFlow), 1)
+	finisher := rf.taskTracker.Add(rf.logContext(trace, LeaderFlow), 1)
+	rf.serverWaitGroup.Add(1)
 	go func() {
+		defer rf.serverWaitGroup.Done()
 		runAsLeaderUnlocker := rf.lock(LeaderFlow)
-		logContext := rf.logContext(trace, LeaderFlow)
-		defer finisher.Done(logContext)
+		defer finisher.Done(rf.logContext(trace, LeaderFlow))
 		runAsLeaderUnlocker.unlock(LeaderFlow)
 
 		runAsLeaderUnlocker = rf.lock(LeaderFlow)
@@ -843,32 +850,36 @@ func (rf *Raft) runAsLeader(trace telemetry.Trace) {
 				rf.matchIndices[peerServerID])
 		}
 
-		sendHeartbeatsFinisher := newRoleCancelContext.Add(rf.logContext(trace, LeaderFlow), 1)
+		sendHeartbeatsFinisher := rf.taskTracker.Add(rf.logContext(trace, LeaderFlow), 1)
+		rf.serverWaitGroup.Add(1)
 		go func() {
+			defer rf.serverWaitGroup.Done()
 			logUnlocker := rf.lock(LeaderFlow)
 			logContextForSendHeartbeats := rf.logContext(trace, LeaderFlow)
-			logUnlocker.unlock(LeaderFlow)
 			defer sendHeartbeatsFinisher.Done(logContextForSendHeartbeats)
+			logUnlocker.unlock(LeaderFlow)
 
 			rf.sendHeartbeats(trace, newRoleCancelContext)
 		}()
 
-		replicateLogFinisher := newRoleCancelContext.Add(rf.logContext(trace, LeaderFlow), 1)
+		replicateLogFinisher := rf.taskTracker.Add(rf.logContext(trace, LeaderFlow), 1)
+		rf.serverWaitGroup.Add(1)
 		go func() {
+			defer rf.serverWaitGroup.Done()
 			logUnlocker := rf.lock(LeaderFlow)
-			logContextForReplicateLog := rf.logContext(trace, LeaderFlow)
+			defer replicateLogFinisher.Done(rf.logContext(trace, LeaderFlow))
 			logUnlocker.unlock(LeaderFlow)
-			defer replicateLogFinisher.Done(logContextForReplicateLog)
 
 			rf.replicateLogToAllPeers(trace, newRoleCancelContext)
 		}()
 
-		updateCommitIndexFinisher := newRoleCancelContext.Add(rf.logContext(trace, LeaderFlow), 1)
+		updateCommitIndexFinisher := rf.taskTracker.Add(rf.logContext(trace, LeaderFlow), 1)
+		rf.serverWaitGroup.Add(1)
 		go func() {
+			defer rf.serverWaitGroup.Done()
 			logUnlocker := rf.lock(LeaderFlow)
-			logContextForUpdateCommitIndex := rf.logContext(trace, LeaderFlow)
+			defer updateCommitIndexFinisher.Done(rf.logContext(trace, LeaderFlow))
 			logUnlocker.unlock(LeaderFlow)
-			defer updateCommitIndexFinisher.Done(logContextForUpdateCommitIndex)
 
 			rf.updateCommitIndex(trace, newRoleCancelContext)
 		}()
@@ -886,7 +897,7 @@ func (rf *Raft) beginElection(trace telemetry.Trace, roleCancelContext *CancelCo
 	currentServerID := rf.serverID
 	currentTerm := rf.currentTerm.Value
 	lastLogIndex := rf.toAbsoluteLogIndex(len(rf.logEntries.Value) - 1)
-	lastLogTerm := rf.logLastTerm()
+	lastLogTerm := rf.lastLogTerm()
 	rf.votedFor = telemetry.WithTrace[*int]{
 		Trace: trace,
 		Value: &currentServerID,
@@ -894,13 +905,15 @@ func (rf *Raft) beginElection(trace telemetry.Trace, roleCancelContext *CancelCo
 
 	rf.persist(trace, ElectionFlow)
 
-	totalVotes := 1
+	totalResults := 1
 	grantedVotes := 1
 	voteMu := &sync.Mutex{}
 	voteCond := sync.NewCond(voteMu)
 
-	electionFinisher := roleCancelContext.Add(rf.logContext(trace, ElectionFlow), 1)
+	electionFinisher := rf.taskTracker.Add(rf.logContext(trace, ElectionFlow), 1)
+	rf.serverWaitGroup.Add(1)
 	go func() {
+		defer rf.serverWaitGroup.Done()
 		requestVotesUnlocker := rf.lock(ElectionFlow)
 		defer electionFinisher.Done(rf.logContext(trace, ElectionFlow))
 		Log(rf.logContext(trace, ElectionFlow), InfoLevel, "begin requesting votes")
@@ -910,13 +923,17 @@ func (rf *Raft) beginElection(trace telemetry.Trace, roleCancelContext *CancelCo
 				continue
 			}
 
-			peerTrace := rf.newTrace(ElectionFlow)
+			peerTrace := rf.newTrace()
 			Log(rf.logContext(trace, ElectionFlow), InfoLevel, "[peer-trace:(%v)] before request vote from %v", peerTrace, peerServerID)
-			requestVoteFinisher := roleCancelContext.Add(rf.logContext(peerTrace, ElectionFlow), 1)
+
+			requestVoteFinisher := rf.taskTracker.Add(rf.logContext(peerTrace, ElectionFlow), 1)
+			rf.serverWaitGroup.Add(1)
 			go func(peerServerID int, peerTrace telemetry.Trace) {
+				defer rf.serverWaitGroup.Done()
 				requestUnlocker := rf.lock(ElectionFlow)
-				defer voteCond.Signal()
 				defer requestVoteFinisher.Done(rf.logContext(peerTrace, ElectionFlow))
+				defer voteCond.Signal()
+
 				requestVoteArgs := &RequestVoteArgs{
 					Trace:        peerTrace,
 					Term:         currentTerm,
@@ -940,10 +957,49 @@ func (rf *Raft) beginElection(trace telemetry.Trace, roleCancelContext *CancelCo
 						return
 					}
 
+					logContext := rf.logContext(peerTrace, ElectionFlow)
 					unlocker.unlock(ElectionFlow)
 
-					reply := &RequestVoteReply{}
-					succeed := rf.sendRequestVote(peerServerID, requestVoteArgs, reply, ElectionFlow)
+					rpcResultCh := make(chan rpc.Result[RequestVoteReply], 1)
+					finisher := rf.taskTracker.Add(logContext, 1)
+					go func() {
+						defer finisher.Done(logContext)
+						tmpReply := &RequestVoteReply{}
+						succeed := rf.sendRequestVote(peerServerID, requestVoteArgs, tmpReply, ElectionFlow)
+						rpcResultCh <- rpc.Result[RequestVoteReply]{
+							Succeed: succeed,
+							Reply:   tmpReply,
+						}
+					}()
+
+					var rpcResult rpc.Result[RequestVoteReply]
+					select {
+					case rpcResult = <-rpcResultCh:
+					case <-time.After(requestTimeOut):
+						logUnlocker := rf.lock(ElectionFlow)
+						Log(rf.logContext(peerTrace, ElectionFlow),
+							InfoLevel,
+							"request timeout, retry requestVote")
+						logUnlocker.unlock(HeartbeatFlow)
+						continue
+					case <-electionCancelContext.OnCancel(logContext):
+						logUnlocker := rf.lock(ElectionFlow)
+						Log(rf.logContext(peerTrace, ElectionFlow),
+							InfoLevel,
+							"election canceled, exit requestVote")
+						logUnlocker.unlock(ElectionFlow)
+						return
+					case <-roleCancelContext.OnCancel(logContext):
+						logUnlocker := rf.lock(ElectionFlow)
+						Log(rf.logContext(peerTrace, ElectionFlow),
+							InfoLevel,
+							"canceled, exit requestVote")
+						logUnlocker.unlock(ElectionFlow)
+						return
+					}
+
+					succeed := rpcResult.Succeed
+					reply := rpcResult.Reply
 					voteMu.Lock()
 					peerUnlocker := rf.lock(ElectionFlow)
 					if roleCancelContext.IsCanceled(rf.logContext(peerTrace, ElectionFlow)) {
@@ -976,6 +1032,7 @@ func (rf *Raft) beginElection(trace telemetry.Trace, roleCancelContext *CancelCo
 						continue
 					}
 
+					totalResults++
 					if reply.IsCanceled {
 						Log(
 							rf.logContext(peerTrace, ElectionFlow),
@@ -986,7 +1043,6 @@ func (rf *Raft) beginElection(trace telemetry.Trace, roleCancelContext *CancelCo
 						continue
 					}
 
-					totalVotes++
 					if reply.Term > rf.currentTerm.Value {
 						Log(
 							rf.logContext(peerTrace, ElectionFlow),
@@ -1030,9 +1086,9 @@ func (rf *Raft) beginElection(trace telemetry.Trace, roleCancelContext *CancelCo
 		requestVotesUnlocker.unlock(ElectionFlow)
 
 		voteMu.Lock()
-		for totalVotes < totalServers &&
+		for totalResults < totalServers &&
 			grantedVotes < majorityServers &&
-			totalVotes-grantedVotes < majorityServers {
+			totalResults-grantedVotes < majorityServers {
 			waitVotesUnlocker := rf.lock(ElectionFlow)
 			if roleCancelContext.IsCanceled(rf.logContext(trace, ElectionFlow)) {
 				Log(rf.logContext(trace, ElectionFlow), InfoLevel, "role canceled, exit beginElection")
@@ -1088,7 +1144,7 @@ func (rf *Raft) sendHeartbeats(trace telemetry.Trace, cancelContext *CancelConte
 
 	for {
 		sendHeartbeatsUnlocker := rf.lock(HeartbeatFlow)
-		loopTrace := rf.newTrace(HeartbeatFlow)
+		loopTrace := rf.newTrace()
 		if cancelContext.IsCanceled(rf.logContext(loopTrace, HeartbeatFlow)) {
 			Log(rf.logContext(loopTrace, HeartbeatFlow), InfoLevel, "canceled, exit sendHeartbeats")
 			sendHeartbeatsUnlocker.unlock(HeartbeatFlow)
@@ -1097,15 +1153,13 @@ func (rf *Raft) sendHeartbeats(trace telemetry.Trace, cancelContext *CancelConte
 
 		currentTerm := rf.currentTerm.Value
 		leaderID := rf.serverID
-		prevLogIndex := rf.logLastIndex()
-		prevLogTerm := rf.logLastTerm()
 		leaderCommitIndex := rf.commitIndex.Value
 		for peerServerID := 0; peerServerID < len(rf.peers); peerServerID++ {
 			if peerServerID == rf.serverID {
 				continue
 			}
 
-			peerTrace := rf.newTrace(HeartbeatFlow)
+			peerTrace := rf.newTrace()
 			Log(rf.logContext(loopTrace, HeartbeatFlow), InfoLevel, "[peer-trace:(%v)] before send heartbeat to %v",
 				peerTrace,
 				peerServerID)
@@ -1115,7 +1169,9 @@ func (rf *Raft) sendHeartbeats(trace telemetry.Trace, cancelContext *CancelConte
 				return
 			}
 
-			sendHeartbeatFinisher := cancelContext.Add(rf.logContext(peerTrace, HeartbeatFlow), 1)
+			Log(rf.logContext(loopTrace, HeartbeatFlow), InfoLevel, "send heartbeat to %v", peerServerID)
+
+			sendHeartbeatFinisher := rf.taskTracker.Add(rf.logContext(peerTrace, HeartbeatFlow), 1)
 			go func(peerTrace telemetry.Trace, peerServerID int) {
 				peerUnlocker := rf.lock(HeartbeatFlow)
 				defer sendHeartbeatFinisher.Done(rf.logContext(peerTrace, HeartbeatFlow))
@@ -1126,6 +1182,8 @@ func (rf *Raft) sendHeartbeats(trace telemetry.Trace, cancelContext *CancelConte
 					return
 				}
 
+				prevLogIndex := rf.matchIndices[peerServerID].Value
+				prevLogTerm := rf.logTerm(prevLogIndex)
 				args := &AppendEntriesArgs{
 					Trace:             peerTrace,
 					Term:              currentTerm,
@@ -1135,6 +1193,7 @@ func (rf *Raft) sendHeartbeats(trace telemetry.Trace, cancelContext *CancelConte
 					LogEntries:        nil,
 					LeaderCommitIndex: leaderCommitIndex,
 				}
+
 				peerUnlocker.unlock(HeartbeatFlow)
 
 				reply := &AppendEntriesReply{}
@@ -1206,7 +1265,7 @@ func (rf *Raft) replicateLogToAllPeers(trace telemetry.Trace, cancelContext *Can
 		}
 
 		replicateLogToPeerUnlocker := rf.lock(LogReplicationFlow)
-		peerTrace := rf.newTrace(LogReplicationFlow)
+		peerTrace := rf.newTrace()
 		Log(rf.logContext(trace, LogReplicationFlow), InfoLevel, "[peer-trace:(%v)] before replicateLogToOnePeer for %v", peerTrace, peerServerID)
 		if cancelContext.IsCanceled(rf.logContext(peerTrace, LogReplicationFlow)) {
 			Log(rf.logContext(peerTrace, LogReplicationFlow), InfoLevel, "canceled, exit replicateLogToAllPeers")
@@ -1214,7 +1273,7 @@ func (rf *Raft) replicateLogToAllPeers(trace telemetry.Trace, cancelContext *Can
 			return
 		}
 
-		replicateLogToPeerFinisher := cancelContext.Add(rf.logContext(peerTrace, LogReplicationFlow), 1)
+		replicateLogToPeerFinisher := rf.taskTracker.Add(rf.logContext(peerTrace, LogReplicationFlow), 1)
 		replicateLogToPeerUnlocker.unlock(LogReplicationFlow)
 		wg.Add(1)
 		go func(peerServerID int) {
@@ -1242,7 +1301,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 
 	for {
 		replicateLogUnlocker := rf.lock(LogReplicationFlow)
-		loopTrace := rf.newTrace(LogReplicationFlow)
+		loopTrace := rf.newTrace()
 		Log(rf.logContext(trace, LogReplicationFlow), InfoLevel, "[loop-trace:(%v)] start new replicateLogToOnePeer loop for %v", loopTrace, peerServerID)
 		if cancelContext.IsCanceled(rf.logContext(loopTrace, LogReplicationFlow)) {
 			Log(rf.logContext(loopTrace, LogReplicationFlow), InfoLevel, "canceled, exit replicateLogToOnePeer for %v", peerServerID)
@@ -1250,7 +1309,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 			return
 		}
 
-		lastEntryIndex := rf.logLastIndex()
+		lastEntryIndex := rf.lastLogIndex()
 		Log(rf.logContext(loopTrace, LogReplicationFlow), InfoLevel, "lastEntryIndex=%v, matchIndex=%v, nextIndex=%v",
 			lastEntryIndex,
 			rf.matchIndices[peerServerID],
@@ -1288,12 +1347,21 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 			Log(rf.logContext(loopTrace, LogReplicationFlow), InfoLevel, "[commandIndex-trace:(%v)] received new command index: commandIndex=%v",
 				commandIndexWithTrace.Trace,
 				commandIndex)
-			lastEntryIndex = rf.logLastIndex()
+			lastEntryIndex = rf.lastLogIndex()
 			if commandIndex < lastEntryIndex {
 				Log(rf.logContext(loopTrace, LogReplicationFlow), InfoLevel, "command index outdated, skipping: peer=%v, commandIndex=%v, endOfLog=%v",
 					peerServerID,
 					commandIndex,
 					lastEntryIndex)
+				replicateLogUnlocker.unlock(LogReplicationFlow)
+				continue
+			}
+
+			if commandIndex <= rf.matchIndices[peerServerID].Value {
+				Log(rf.logContext(loopTrace, LogReplicationFlow), InfoLevel, "command index outdated, skipping: peer=%v, commandIndex=%v, matchIndex=%v",
+					peerServerID,
+					commandIndex,
+					rf.matchIndices[peerServerID])
 				replicateLogUnlocker.unlock(LogReplicationFlow)
 				continue
 			}
@@ -1318,19 +1386,21 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 			logContext := rf.logContext(loopTrace, SnapshotFlow)
 			replicateLogUnlocker.unlock(SnapshotFlow)
 
-			resultCh := make(chan RPCResult[InstallSnapshotReply])
+			rpcResultCh := make(chan rpc.Result[InstallSnapshotReply], 1)
+			finisher := rf.taskTracker.Add(logContext, 1)
 			go func() {
+				defer finisher.Done(logContext)
 				tmpReply := &InstallSnapshotReply{}
 				succeed := rf.sendInstallSnapshot(peerServerID, &installSnapshotArgs, tmpReply, SnapshotFlow)
-				resultCh <- RPCResult[InstallSnapshotReply]{
-					succeed: succeed,
-					reply:   tmpReply,
+				rpcResultCh <- rpc.Result[InstallSnapshotReply]{
+					Succeed: succeed,
+					Reply:   tmpReply,
 				}
 			}()
 
-			var result RPCResult[InstallSnapshotReply]
+			var rpcResult rpc.Result[InstallSnapshotReply]
 			select {
-			case result = <-resultCh:
+			case rpcResult = <-rpcResultCh:
 			case <-time.After(requestTimeOut):
 				logUnlocker := rf.lock(SnapshotFlow)
 				Log(
@@ -1349,6 +1419,8 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 				return
 			}
 
+			succeed := rpcResult.Succeed
+			reply := rpcResult.Reply
 			replicateLogUnlocker = rf.lock(SnapshotFlow)
 			if cancelContext.IsCanceled(rf.logContext(loopTrace, SnapshotFlow)) {
 				Log(rf.logContext(loopTrace, SnapshotFlow),
@@ -1359,7 +1431,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 				return
 			}
 
-			if !result.succeed {
+			if !succeed {
 				Log(rf.logContext(loopTrace, SnapshotFlow),
 					InfoLevel,
 					"failed to install snapshot to %v, retrying", peerServerID)
@@ -1367,7 +1439,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 				continue
 			}
 
-			if result.reply.IsCanceled {
+			if reply.IsCanceled {
 				Log(rf.logContext(loopTrace, SnapshotFlow),
 					InfoLevel,
 					"peer canceled, retry install snapshot to %v", peerServerID)
@@ -1375,7 +1447,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 				continue
 			}
 
-			if result.reply.Term > rf.currentTerm.Value {
+			if reply.Term > rf.currentTerm.Value {
 				Log(rf.logContext(loopTrace, SnapshotFlow),
 					InfoLevel,
 					"role changed to follower, exit replicateLogToOnePeer for %v",
@@ -1386,7 +1458,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 				}
 				rf.currentTerm = telemetry.WithTrace[int]{
 					Trace: loopTrace,
-					Value: result.reply.Term,
+					Value: reply.Term,
 				}
 				rf.votedFor = telemetry.WithTrace[*int]{
 					Trace: loopTrace,
@@ -1423,6 +1495,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 		}
 
 		logEntries := rf.logEntries.Value[rf.toRelativeIndex(nextIndex):]
+		logEntries = append([]LogEntry{}, logEntries...)
 		args := &AppendEntriesArgs{
 			Trace:             loopTrace,
 			Term:              rf.currentTerm.Value,
@@ -1435,19 +1508,21 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 		logContext := rf.logContext(loopTrace, LogReplicationFlow)
 		replicateLogUnlocker.unlock(LogReplicationFlow)
 
-		resultCh := make(chan RPCResult[AppendEntriesReply])
+		rpcResultCh := make(chan rpc.Result[AppendEntriesReply], 1)
+		finisher := rf.taskTracker.Add(logContext, 1)
 		go func() {
+			defer finisher.Done(logContext)
 			tmpReply := &AppendEntriesReply{}
 			succeed := rf.sendAppendEntries(peerServerID, args, tmpReply, LogReplicationFlow)
-			resultCh <- RPCResult[AppendEntriesReply]{
-				succeed: succeed,
-				reply:   tmpReply,
+			rpcResultCh <- rpc.Result[AppendEntriesReply]{
+				Succeed: succeed,
+				Reply:   tmpReply,
 			}
 		}()
 
-		var result RPCResult[AppendEntriesReply]
+		var rpcResult rpc.Result[AppendEntriesReply]
 		select {
-		case result = <-resultCh:
+		case rpcResult = <-rpcResultCh:
 		case <-time.After(requestTimeOut):
 			logUnlocker := rf.lock(LogReplicationFlow)
 			Log(rf.logContext(loopTrace, LogReplicationFlow),
@@ -1464,6 +1539,8 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 			return
 		}
 
+		succeed := rpcResult.Succeed
+		reply := rpcResult.Reply
 		replicateLogUnlocker = rf.lock(LogReplicationFlow)
 		if cancelContext.IsCanceled(rf.logContext(loopTrace, LogReplicationFlow)) {
 			Log(rf.logContext(loopTrace, LogReplicationFlow),
@@ -1475,10 +1552,11 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 
 		Log(rf.logContext(loopTrace, LogReplicationFlow),
 			InfoLevel,
-			"received RPC result: %v",
-			result)
+			"received RPC result: succeed=%v, reply=%+v",
+			succeed,
+			reply)
 
-		if !result.succeed {
+		if !succeed {
 			Log(rf.logContext(loopTrace, LogReplicationFlow),
 				InfoLevel,
 				"failed to replicate log")
@@ -1486,7 +1564,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 			continue
 		}
 
-		if result.reply.IsCanceled {
+		if reply.IsCanceled {
 			Log(rf.logContext(loopTrace, LogReplicationFlow),
 				InfoLevel,
 				"peer canceled, retry replicating log")
@@ -1494,7 +1572,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 			continue
 		}
 
-		if result.reply.Term > rf.currentTerm.Value {
+		if reply.Term > rf.currentTerm.Value {
 			Log(rf.logContext(loopTrace, LogReplicationFlow),
 				InfoLevel,
 				"role changed, exit replicateLogToOnePeer")
@@ -1504,7 +1582,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 			}
 			rf.currentTerm = telemetry.WithTrace[int]{
 				Trace: loopTrace,
-				Value: result.reply.Term,
+				Value: reply.Term,
 			}
 			rf.votedFor = telemetry.WithTrace[*int]{
 				Trace: loopTrace,
@@ -1516,7 +1594,7 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 			return
 		}
 
-		if result.reply.Success {
+		if reply.Success {
 			rf.nextIndices[peerServerID] = telemetry.WithTrace[int]{
 				Trace: loopTrace,
 				Value: lastEntryIndex + 1,
@@ -1542,14 +1620,14 @@ func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *Canc
 		Log(rf.logContext(loopTrace, LogReplicationFlow),
 			InfoLevel,
 			"backing off: %+v",
-			result.reply)
+			reply)
 		newNextIndex := rf.nextIndices[peerServerID].Value
-		if result.reply.ConflictTerm == nil {
-			newNextIndex = result.reply.ConflictLogLastIndex + 1
+		if reply.ConflictTerm == nil {
+			newNextIndex = reply.ConflictLogLastIndex + 1
 		} else {
-			newNextIndex = result.reply.ConflictIndex
+			newNextIndex = reply.ConflictIndex
 			for relativeIndex := rf.toRelativeIndex(len(rf.logEntries.Value)); relativeIndex >= 0; relativeIndex-- {
-				if rf.logEntries.Value[relativeIndex].Term == *result.reply.ConflictTerm {
+				if rf.logEntries.Value[relativeIndex].Term == *reply.ConflictTerm {
 					newNextIndex = rf.toAbsoluteLogIndex(relativeIndex)
 					break
 				}
@@ -1573,7 +1651,7 @@ func (rf *Raft) updateCommitIndex(trace telemetry.Trace, cancelContext *CancelCo
 
 	for {
 		logUnlocker := rf.lock(CommitFlow)
-		loopTrace := rf.newTrace(CommitFlow)
+		loopTrace := rf.newTrace()
 		Log(rf.logContext(trace, CommitFlow), InfoLevel, "[loop-trace:(%v)] start new updateCommitIndex loop", loopTrace)
 		if cancelContext.IsCanceled(rf.logContext(loopTrace, CommitFlow)) {
 			Log(rf.logContext(loopTrace, CommitFlow), InfoLevel, "canceled, exit updateCommitIndex")
@@ -1602,7 +1680,7 @@ func (rf *Raft) updateCommitIndex(trace telemetry.Trace, cancelContext *CancelCo
 
 		matchIndex := matchIndexWithTrace.Value
 		updateIndexUnlocker := rf.lock(CommitFlow)
-		Log(rf.logContext(loopTrace, CommitFlow), InfoLevel, "[matchIndexTrace:%v] received matchIndex: matchIndex=%v, commitIndex=%v",
+		Log(rf.logContext(loopTrace, CommitFlow), InfoLevel, "[matchIndex-trace:%v] received matchIndex: matchIndex=%v, commitIndex=%v",
 			matchIndexWithTrace.Trace,
 			matchIndex,
 			rf.commitIndex)
@@ -1655,7 +1733,7 @@ func (rf *Raft) tryUpdateCommitIndex(trace telemetry.Trace, matchIndex int) {
 				Value: index,
 			}
 			Log(rf.logContext(trace, CommitFlow), InfoLevel, "commitIndex updated to %v", rf.commitIndex)
-			rf.notifyCommitIndexChange(trace, CommitFlow, index)
+			rf.notifyCommitIndexChange(trace, index)
 			return
 		}
 	}
@@ -1673,7 +1751,7 @@ func (rf *Raft) applyCommittedEntriesAndSnapshot(trace telemetry.Trace) {
 	for {
 		applyUnlocker := rf.lock(ApplyFlow)
 
-		loopTrace := rf.newTrace(ApplyFlow)
+		loopTrace := rf.newTrace()
 		Log(rf.logContext(trace, ApplyFlow), InfoLevel, "[loop-trace:(%v)] start new applyCommittedEntriesAndSnapshot loop", loopTrace)
 		logContext := rf.logContext(loopTrace, ApplyFlow)
 		applyUnlocker.unlock(ApplyFlow)
@@ -1717,7 +1795,7 @@ func (rf *Raft) applyCommittedEntriesAndSnapshot(trace telemetry.Trace) {
 				snapshotWithTraceAndCancel.Trace,
 				snapshotWithCancel.Value)
 			if !rf.applySnapshot(loopTrace, snapshotWithCancel.CancelContext, snapshotWithCancel.Value) {
-				return
+				continue
 			}
 
 		case <-rf.serverCancelContext.OnCancel(logContext):
@@ -1754,6 +1832,11 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 	cancelContext := newCancelContext(trace)
 	rf.applyEntriesCancelContext = cancelContext
 	applyUnlocker.unlock(ApplyEntryFlow)
+	defer func() {
+		unlocker := rf.lock(ApplyEntryFlow)
+		defer unlocker.unlock(ApplyEntryFlow)
+		rf.applyEntriesCancelContext = nil
+	}()
 
 	for index := rf.lastAppliedIndex.Value + 1; index <= commitIndex; index++ {
 		applyUnlocker = rf.lock(ApplyEntryFlow)
@@ -1862,7 +1945,6 @@ func (rf *Raft) applySnapshot(trace telemetry.Trace, cancelContext *CancelContex
 	applyMsg := ApplyMsg{
 		SnapshotValid: true,
 		SnapshotIndex: snapshot.LastIncludedIndex,
-		SnapshotTerm:  snapshot.LastIncludedTerm,
 		Snapshot:      snapshot.Data,
 	}
 
@@ -1918,7 +2000,7 @@ func (rf *Raft) applySnapshot(trace telemetry.Trace, cancelContext *CancelContex
 		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "apply remaining log entries after snapshot: lastAppliedIndex=%v, commitIndex=%v",
 			rf.lastAppliedIndex,
 			rf.commitIndex)
-		rf.notifyCommitIndexChange(trace, SnapshotFlow, rf.commitIndex.Value)
+		rf.notifyCommitIndexChange(trace, rf.commitIndex.Value)
 	}
 
 	return true
@@ -2008,7 +2090,7 @@ func (rf *Raft) logTerm(logIndex int) int {
 	return rf.logEntries.Value[relativeIndex].Term
 }
 
-func (rf *Raft) logLastIndex() int {
+func (rf *Raft) lastLogIndex() int {
 	if len(rf.logEntries.Value) == 0 {
 		return rf.snapshot.Value.LastIncludedIndex
 	}
@@ -2016,7 +2098,7 @@ func (rf *Raft) logLastIndex() int {
 	return rf.toAbsoluteLogIndex(len(rf.logEntries.Value) - 1)
 }
 
-func (rf *Raft) logLastTerm() int {
+func (rf *Raft) lastLogTerm() int {
 	if len(rf.logEntries.Value) == 0 {
 		return rf.snapshot.Value.LastIncludedTerm
 	}
@@ -2032,12 +2114,7 @@ func (rf *Raft) toAbsoluteLogIndex(relativeIndex int) int {
 	return rf.snapshot.Value.LastIncludedIndex + relativeIndex + 1
 }
 
-func (rf *Raft) notifyCommitIndexChange(trace telemetry.Trace, flow Flow, newCommitIndex int) {
-	if rf.applyEntriesCancelContext != nil {
-		rf.applyEntriesCancelContext.TryCancel(rf.logContext(trace, flow))
-		rf.applyEntriesCancelContext = nil
-	}
-
+func (rf *Raft) notifyCommitIndexChange(trace telemetry.Trace, newCommitIndex int) {
 	rf.onCommitIndexChangeSignal.Send(telemetry.WithTrace[int]{
 		Trace: trace,
 		Value: newCommitIndex,
@@ -2271,15 +2348,14 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 	return ok
 }
 
-func (rf *Raft) newTrace(flow Flow) telemetry.Trace {
+func (rf *Raft) newTrace() telemetry.Trace {
 	nextTraceID := rf.nextTraceID
 	rf.nextTraceID++
-	trace := telemetry.Trace{
-		ServerID: rf.serverID,
-		TraceID:  nextTraceID,
+	return telemetry.Trace{
+		Namespace:  traceNamespace,
+		EndpointID: rf.serverID,
+		TraceID:    nextTraceID,
 	}
-	rf.persist(trace, flow)
-	return trace
 }
 
 func (rf *Raft) logContext(trace telemetry.Trace, flow Flow) LogContext {
@@ -2310,28 +2386,27 @@ func (rf *Raft) lock(flow Flow) *Unlocker {
 	rf.mu.Lock()
 	nextLockID := rf.nextLockID
 	rf.nextLockID++
-	rf.locks[nextLockID] = struct{}{}
 	LogAndSkipCallers(
 		LogContext{
 			ServerID: rf.serverID,
 			Role:     rf.currentRole.Value,
 			Term:     rf.currentTerm.Value,
 			Flow:     flow,
-		}, DebugLevel, 1, "lock(%v): locks=%v", nextLockID, rf.locks)
+		}, DebugLevel, 1, "lock(%v)", nextLockID)
 	return &Unlocker{
 		lockID:     nextLockID,
+		lockedAt:   time.Now(),
 		unlockFunc: rf.unlock,
 	}
 }
 
-func (rf *Raft) unlock(lockID uint64, flow Flow, skipCallers int) {
-	delete(rf.locks, lockID)
+func (rf *Raft) unlock(lockID uint64, flow Flow, lockDuration time.Duration, skipCallers int) {
 	LogAndSkipCallers(LogContext{
 		ServerID: rf.serverID,
 		Role:     rf.currentRole.Value,
 		Term:     rf.currentTerm.Value,
 		Flow:     flow,
-	}, DebugLevel, skipCallers+1, "unlock(%v): locks=%v", lockID, rf.locks)
+	}, DebugLevel, skipCallers+1, "unlock(%v): lockDuration=%v", lockID, lockDuration)
 	rf.mu.Unlock()
 }
 
@@ -2361,8 +2436,9 @@ func Make(
 
 	var nextCancelContextId uint64 = 0
 	defaultTrace := telemetry.Trace{
-		ServerID: me,
-		TraceID:  0,
+		Namespace:  traceNamespace,
+		EndpointID: me,
+		TraceID:    0,
 	}
 	rf := &Raft{
 		peers:     peers,
@@ -2395,15 +2471,13 @@ func Make(
 		onNewSnapshotSignal:       signal.NewSignal[telemetry.WithTrace[WithCancel[Snapshot]]](1),
 		onMatchIndexChangeSignal:  signal.NewSignal[telemetry.WithTrace[int]](1),
 		onCommitIndexChangeSignal: signal.NewSignal[telemetry.WithTrace[int]](1),
-		locks:                     make(map[uint64]struct{}),
+		taskTracker:               newTaskTracker(),
+		serverWaitGroup:           &sync.WaitGroup{},
 	}
 
-	rf.readPersist(telemetry.Trace{
-		ServerID: rf.serverID,
-		TraceID:  0,
-	}, persister.ReadRaftState(), persister.ReadSnapshot(), SharedFlow)
+	rf.readPersist(defaultTrace, persister.ReadRaftState(), persister.ReadSnapshot(), SharedFlow)
 
-	trace := rf.newTrace(SharedFlow)
+	trace := rf.newTrace()
 	Log(rf.logContext(trace, SharedFlow), InfoLevel, "Make(%v) begin", rf.serverID)
 	cancelContext := newCancelContext(trace)
 	rf.serverCancelContext = cancelContext
@@ -2414,11 +2488,13 @@ func Make(
 		Trace: trace,
 		Value: rf.snapshot.Value.LastIncludedIndex,
 	}
-	finisher := cancelContext.Add(rf.logContext(trace, SharedFlow), 1)
+
+	finisher := rf.taskTracker.Add(rf.logContext(trace, SharedFlow), 1)
+	rf.serverWaitGroup.Add(1)
 	go func() {
+		defer rf.serverWaitGroup.Done()
 		unlocker := rf.lock(SharedFlow)
-		logContext := rf.logContext(trace, SharedFlow)
-		defer finisher.Done(logContext)
+		finisher.Done(rf.logContext(trace, SharedFlow))
 		unlocker.unlock(SharedFlow)
 
 		rf.applyCommittedEntriesAndSnapshot(trace)
@@ -2431,18 +2507,12 @@ func Make(
 	}
 
 	rf.runAsFollower(trace)
+	unlocker := rf.lock(SharedFlow)
+	defer unlocker.unlock(SharedFlow)
 	Log(rf.logContext(trace, SharedFlow), InfoLevel, "Make(%v) end", rf.serverID)
 	return rf
 }
 
 func newElectionTimeOut() time.Duration {
 	return electionBaseTimeOut + time.Duration(rand.Intn(electionRandomTimeOutFactor))*electionRandomTimeOutMultiplier
-}
-
-func fmtPtr[Value any](val *Value) string {
-	if val == nil {
-		return "nil"
-	}
-
-	return fmt.Sprintf("%v", *val)
 }

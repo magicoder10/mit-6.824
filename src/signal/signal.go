@@ -5,14 +5,15 @@ import (
 )
 
 type Signal[Data any] struct {
-	buffer        []Data
-	nextToRead    int
-	nextToWrite   int
-	maxBufferSize int
-	size          int
-	mu            *sync.Mutex
-	cond          *sync.Cond
-	isClosed      bool
+	buffer         []Data
+	nextToRead     int
+	nextToWrite    int
+	maxBufferSize  int
+	size           int
+	mu             *sync.Mutex
+	cond           *sync.Cond
+	isClosed       bool
+	waitForNewData bool
 }
 
 func (s *Signal[Data]) Send(data Data) bool {
@@ -24,13 +25,19 @@ func (s *Signal[Data]) Send(data Data) bool {
 	}
 
 	if s.size == s.maxBufferSize {
-		s.receive()
+		_, ok := s.receive()
+		if !ok {
+			return false
+		}
 	}
 
 	s.buffer[s.nextToWrite] = data
 	s.size++
 	s.nextToWrite = (s.nextToWrite + 1) % s.maxBufferSize
-	s.cond.Signal()
+
+	if s.waitForNewData {
+		s.cond.Signal()
+	}
 
 	return true
 }
@@ -72,12 +79,14 @@ func (s *Signal[Data]) Close() {
 }
 
 func (s *Signal[Data]) receive() (Data, bool) {
-	for s.size == 0 {
-		if s.isClosed {
-			break
-		}
+	if s.isClosed {
+		return *new(Data), false
+	}
 
+	if s.size == 0 {
+		s.waitForNewData = true
 		s.cond.Wait()
+		s.waitForNewData = false
 	}
 
 	if s.isClosed {

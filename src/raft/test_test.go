@@ -904,6 +904,8 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		fmt.Printf("start iteration %v\n", iters)
+
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
@@ -935,6 +937,8 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				nup += 1
 			}
 		}
+
+		fmt.Printf("end iteration %v\n", iters)
 	}
 
 	for i := 0; i < servers; i++ {

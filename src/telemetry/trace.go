@@ -5,14 +5,15 @@ import (
 )
 
 type Trace struct {
-	ServerID int
-	TraceID  uint64
+	Namespace  string
+	EndpointID int
+	TraceID    uint64
 }
 
 var _ fmt.Stringer = (*Trace)(nil)
 
 func (t Trace) String() string {
-	return fmt.Sprintf("%v/%v", t.ServerID, t.TraceID)
+	return fmt.Sprintf("%v/%v/%v", t.Namespace, t.EndpointID, t.TraceID)
 }
 
 type WithTrace[Value any] struct {
