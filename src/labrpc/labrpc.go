@@ -64,7 +64,7 @@ import (
 	"6.5840/telemetry"
 )
 
-const printDebugLog = true
+const printDebugLog = false
 
 type MessageContext struct {
 	Trace      telemetry.Trace
@@ -82,7 +82,7 @@ func (m MessageContext) String() string {
 }
 
 type reqMsg struct {
-	mt       MessageContext
+	mc       MessageContext
 	endname  interface{} // name of sending ClientEnd
 	svcMeth  string      // e.g. "Raft.AppendEntries"
 	argsType reflect.Type
@@ -104,9 +104,9 @@ type ClientEnd struct {
 // send an RPC, wait for the reply.
 // the return value indicates success; false means that
 // no reply was received from the server.
-func (e *ClientEnd) Call(svcMeth string, mt MessageContext, args interface{}, reply interface{}) bool {
+func (e *ClientEnd) Call(svcMeth string, mc MessageContext, args interface{}, reply interface{}) bool {
 	req := reqMsg{}
-	req.mt = mt
+	req.mc = mc
 	req.endname = e.endname
 	req.svcMeth = svcMeth
 	req.argsType = reflect.TypeOf(args)
@@ -248,7 +248,7 @@ func (rn *Network) processReq(req reqMsg) {
 			ms := (rand.Int() % 27)
 
 			if printDebugLog {
-				fmt.Printf("[Network][enabled:%v] %+v short request delay for %vms\n", enabled, req.mt, ms)
+				fmt.Printf("[Network][enabled:%v] %+v short request delay for %vms\n", enabled, req.mc, ms)
 			}
 
 			time.Sleep(time.Duration(ms) * time.Millisecond)
@@ -257,7 +257,7 @@ func (rn *Network) processReq(req reqMsg) {
 		if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the request, return as if timeout
 			if printDebugLog {
-				fmt.Printf("[Network][enabled:%v] %+v drop request\n", enabled, req.mt)
+				fmt.Printf("[Network][enabled:%v] %+v drop request\n", enabled, req.mc)
 			}
 
 			req.replyCh <- replyMsg{false, nil}
@@ -265,7 +265,7 @@ func (rn *Network) processReq(req reqMsg) {
 		}
 
 		if reliable && printDebugLog {
-			fmt.Printf("[Network][enabled:%v] %+v send request immediately\n", enabled, req.mt)
+			fmt.Printf("[Network][enabled:%v] %+v send request immediately\n", enabled, req.mc)
 		}
 
 		// execute the request (call the RPC handler).
@@ -307,9 +307,9 @@ func (rn *Network) processReq(req reqMsg) {
 		serverDead = rn.isServerDead(req.endname, servername, server)
 
 		replyMt := MessageContext{
-			Trace:      req.mt.Trace,
-			SenderID:   req.mt.ReceiverID,
-			ReceiverID: req.mt.SenderID,
+			Trace:      req.mc.Trace,
+			SenderID:   req.mc.ReceiverID,
+			ReceiverID: req.mc.SenderID,
 		}
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
@@ -356,7 +356,7 @@ func (rn *Network) processReq(req reqMsg) {
 			ms = (rand.Int() % 7000)
 
 			if printDebugLog {
-				fmt.Printf("[Network][enabled:%v] %+v long request delay for %vms\n", enabled, req.mt, ms)
+				fmt.Printf("[Network][enabled:%v] %+v long request delay for %vms\n", enabled, req.mc, ms)
 			}
 		} else {
 			// many kv tests require the client to try each
@@ -364,7 +364,7 @@ func (rn *Network) processReq(req reqMsg) {
 			ms = (rand.Int() % 100)
 
 			if printDebugLog {
-				fmt.Printf("[Network][enabled:%v] %+v short request delay for %vms\n", enabled, req.mt, ms)
+				fmt.Printf("[Network][enabled:%v] %+v short request delay for %vms\n", enabled, req.mc, ms)
 			}
 		}
 		time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {

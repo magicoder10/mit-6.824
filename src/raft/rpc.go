@@ -3,19 +3,9 @@ package raft
 import (
 	"fmt"
 
+	internalFmt "6.5840/fmt"
 	"6.5840/telemetry"
 )
-
-type RPCResult[Reply any] struct {
-	succeed bool
-	reply   *Reply
-}
-
-var _ fmt.Stringer = (*RPCResult[int])(nil)
-
-func (R RPCResult[Reply]) String() string {
-	return fmt.Sprintf("[RPCResult succeed:%v, reply:%+v]", R.succeed, *R.reply)
-}
 
 type RequestVoteArgs struct {
 	Trace        telemetry.Trace
@@ -79,7 +69,7 @@ func (a AppendEntriesReply) String() string {
 		a.IsCanceled,
 		a.Term,
 		a.Success,
-		fmtPtr(a.ConflictTerm),
+		internalFmt.FromPtr(a.ConflictTerm),
 		a.ConflictIndex,
 		a.ConflictLogLastIndex)
 }

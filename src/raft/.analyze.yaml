@@ -62,7 +62,8 @@ pipelines:
         - one\([0-9]+\)
         - nCommitted\([0-9]+\)
         - checkOneLeader\([0-9]+\)
-        #      - Start\([0-9]+\)
+        - start iteration
+        - end iteration
         - \[Test\]
         - Passed
         - 'panic: test timed out after'
@@ -143,6 +144,24 @@ pipelines:
         - \[Test\]
     - or:
         - serverID:2
+  applied-server-3:
+    - or:
+        - \] applying log entry [0-9:]+
+        - finish applying log entries
+        - finish applying snapshot
+        - 'finish applying snapshot: lastAppliedIndex='
+        - \[Test\]
+    - or:
+        - serverID:3
+  applied-server-4:
+    - or:
+        - \] applying log entry [0-9:]+
+        - finish applying log entries
+        - finish applying snapshot
+        - 'finish applying snapshot: lastAppliedIndex='
+        - \[Test\]
+    - or:
+        - serverID:4
   snapshot-server-0:
     - or:
         - flow:Snapshot
@@ -170,6 +189,7 @@ pipelines:
         - crash1\([0-9]+\)
         - connect\([0-9]+\)
         - disconnect\([0-9]+\)
+        - \[Network\]
         - flow:LogReplication
         - flow:Commit
     - or:
@@ -178,28 +198,117 @@ pipelines:
         - crash1\([0-9]+\)
         - connect\([0-9]+\)
         - disconnect\([0-9]+\)
+        - \[Network\]
   log-replication-2:
     - or:
         - flow:LogReplication
         - flow:Commit
     - or:
         - serverID:2
-  trace-1-112:
+  log-replication-3:
     - or:
-        - trace:\(1/112\)
-  replicate-to-2:
+        - start[0-9]+\([0-9]+\)
+        - crash[0-9]+\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
+        - one\([0-9]+\)
+        - nCommitted\([0-9]+\)
+        - checkOneLeader\([0-9]+\)
+        - flow:LogReplication
+        - flow:Commit
+        - '\[Network\]\[(true|false)\] {MessageID:(\d+) SenderID:3 ReceiverID:(\d+)'
+        - '\[Network\]\[(true|false)\] {MessageID:(\d+) SenderID:(\d+) ReceiverID:3'
     - or:
-        - start new replicateLogToOnePeer loop for 0
+        - serverID:3
+        - start[0-9]+\([0-9]+\)
+        - crash[0-9]+\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
+        - one\([0-9]+\)
+        - nCommitted\([0-9]+\)
+        - checkOneLeader\([0-9]+\)
+  log-replication-4:
+    - or:
+        - start[0-9]+\([0-9]+\)
+        - crash[0-9]+\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
+        - one\([0-9]+\)
+        - nCommitted\([0-9]+\)
+        - checkOneLeader\([0-9]+\)
+        - flow:LogReplication
+        - flow:Commit
+        - \[Network\]
+    - or:
+        - serverID:4
+        - start[0-9]+\([0-9]+\)
+        - crash[0-9]+\([0-9]+\)
+        - connect\([0-9]+\)
+        - disconnect\([0-9]+\)
+        - one\([0-9]+\)
+        - nCommitted\([0-9]+\)
+        - checkOneLeader\([0-9]+\)
+        - \[Network\]
+  append-entry-2:
+    - or:
+        - append new log entry
     - or:
         - serverID:2
+  append-entry-4:
     - or:
-        - term:4
+        - append new log entry
+    - or:
+        - serverID:4
+  trace-4-1499:
+    - or:
+        - trace:\(raft/4/1499\)
+  trace-4-1501:
+    - or:
+        - raft/4/1501
+        - raft/4/1511
   traces:
     - or:
-        - trace:\(2/499\)
-        - trace:\(1/399\)
-        - trace:\(2/460\)
-        - trace:\(2/504\)
+        - trace:\(raft/2/2524\)
+        - trace:\(raft/2/2534\)
+        - trace:\(raft/2/2527\)
+  unlocks:
+    - or:
+        - \] unlock
+#  runningTask:
+#    - or:
+#        - runningTasks=
+#        - Kill enter
+#        - Kill exit
+#  server-0-lock:
+#    - or:
+#        - serverID:0
+#    - or:
+#        - \] lock
+#        - \] unlock
+#  server-1-lock:
+#    - or:
+#        - serverID:1
+#    - or:
+#        - \] lock
+#        - \] unlock
+#  server-2-lock:
+#    - or:
+#        - serverID:2
+#    - or:
+#        - \] lock
+#        - \] unlock
+#  server-3-lock:
+#    - or:
+#        - serverID:3
+#    - or:
+#        - \] lock
+#        - \] unlock
+#  server-4-lock:
+#    - or:
+#        - serverID:4
+#    - or:
+#        - \] lock
+#        - \] unlock
 #  term-84:
 #    - or:
 #      - term:84

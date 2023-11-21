@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 
+	internalFmt "6.5840/fmt"
+
 	"6.5840/telemetry"
 )
 
@@ -108,7 +110,7 @@ func LogAndSkipCallers(ct LogContext, level LogLevel, skipCallers int, format st
 		ct.Role,
 		ct.Term,
 		ct.Flow,
-		fmtPtr(ct.Trace),
+		internalFmt.FromPtr(ct.Trace),
 		runtime.NumGoroutine(),
 		fmt.Sprintf(format, objs...))
 }
@@ -137,7 +139,7 @@ func MessageAndSkipCallers(ct MessageContext, level LogLevel, skipCallers int, f
 		ct.Role,
 		ct.Term,
 		ct.Flow,
-		fmtPtr(ct.Trace),
+		internalFmt.FromPtr(ct.Trace),
 		runtime.NumGoroutine(),
 		ct.SenderID,
 		ct.ReceiverID,
