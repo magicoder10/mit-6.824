@@ -935,8 +935,6 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				nup += 1
 			}
 		}
-
-		fmt.Printf("end iteration %v\n", iters)
 	}
 
 	for i := 0; i < servers; i++ {
