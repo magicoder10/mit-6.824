@@ -40,7 +40,7 @@ type LogEntry struct {
 var _ fmt.Stringer = (*LogEntry)(nil)
 
 func (l LogEntry) String() string {
-	return fmt.Sprintf("[LogEntry Command:%v, Index:%v, Term:%v]", l.Command, l.Index, l.Term)
+	return fmt.Sprintf("[LogEntry Command:%+v, Index:%v, Term:%v]", l.Command, l.Index, l.Term)
 }
 
 type Snapshot struct {
@@ -71,6 +71,7 @@ type ApplyMsg struct {
 
 	SnapshotValid bool
 	Snapshot      []byte
+	SnapshotTerm  int
 	SnapshotIndex int
 }
 
@@ -105,12 +106,17 @@ type Raft struct {
 	onMatchIndexChangeSignal  *signal.Signal[telemetry.WithTrace[int]]
 	onCommitIndexChangeSignal *signal.Signal[telemetry.WithTrace[int]]
 
+	onNewCommandIndexReceiveChs  []<-chan telemetry.WithTrace[int]
+	onNewSnapshotReceiveCh       <-chan telemetry.WithTrace[WithCancel[Snapshot]]
+	onMatchIndexChangeReceiveCh  <-chan telemetry.WithTrace[int]
+	onCommitIndexChangeReceiveCh <-chan telemetry.WithTrace[int]
+
 	applyEntriesCancelContext  *CancelContext
 	applySnapshotCancelContext *CancelContext
 	roleCancelContext          *CancelContext
 	serverCancelContext        *CancelContext
-	taskTracker                *TaskTracker
 	serverWaitGroup            *sync.WaitGroup
+	taskTracker                *TaskTracker
 
 	nextLockID  uint64
 	nextTraceID uint64
@@ -1296,7 +1302,7 @@ func (rf *Raft) replicateLogToAllPeers(trace telemetry.Trace, cancelContext *Can
 func (rf *Raft) replicateLogToOnePeer(trace telemetry.Trace, cancelContext *CancelContext, peerServerID int) {
 	replicateLogToOnePeerUnlocker := rf.lock(LogReplicationFlow)
 	Log(rf.logContext(trace, LogReplicationFlow), InfoLevel, "enter replicateLogToOnePeer %v", peerServerID)
-	onNewCommandIndexCh := rf.onNewCommandIndexSignals[peerServerID].ReceiveChan()
+	onNewCommandIndexCh := rf.onNewCommandIndexReceiveChs[peerServerID]
 	replicateLogToOnePeerUnlocker.unlock(LogReplicationFlow)
 
 	for {
@@ -1646,7 +1652,7 @@ func (rf *Raft) updateCommitIndex(trace telemetry.Trace, cancelContext *CancelCo
 	updateCommitIndexUnlocker := rf.lock(CommitFlow)
 	logContext := rf.logContext(trace, CommitFlow)
 	Log(logContext, InfoLevel, "enter updateCommitIndex")
-	onMatchIndexChangeCh := rf.onMatchIndexChangeSignal.ReceiveChan()
+	onMatchIndexChangeCh := rf.onMatchIndexChangeReceiveCh
 	updateCommitIndexUnlocker.unlock(CommitFlow)
 
 	for {
@@ -1680,7 +1686,7 @@ func (rf *Raft) updateCommitIndex(trace telemetry.Trace, cancelContext *CancelCo
 
 		matchIndex := matchIndexWithTrace.Value
 		updateIndexUnlocker := rf.lock(CommitFlow)
-		Log(rf.logContext(loopTrace, CommitFlow), InfoLevel, "[matchIndex-trace:%v] received matchIndex: matchIndex=%v, commitIndex=%v",
+		Log(rf.logContext(loopTrace, CommitFlow), InfoLevel, "[matchIndex-trace:(%v)] received matchIndex: matchIndex=%v, commitIndex=%v",
 			matchIndexWithTrace.Trace,
 			matchIndex,
 			rf.commitIndex)
@@ -1737,15 +1743,13 @@ func (rf *Raft) tryUpdateCommitIndex(trace telemetry.Trace, matchIndex int) {
 			return
 		}
 	}
-
-	return
 }
 
 func (rf *Raft) applyCommittedEntriesAndSnapshot(trace telemetry.Trace) {
 	applyCommittedEntriesUnlocker := rf.lock(ApplyFlow)
 	Log(rf.logContext(trace, ApplyFlow), InfoLevel, "enter applyCommittedEntriesAndSnapshot")
-	onCommitIndexChangeSignalCh := rf.onCommitIndexChangeSignal.ReceiveChan()
-	onNewSnapshotSignalCh := rf.onNewSnapshotSignal.ReceiveChan()
+	onCommitIndexChangeSignalCh := rf.onCommitIndexChangeReceiveCh
+	onNewSnapshotSignalCh := rf.onNewSnapshotReceiveCh
 	applyCommittedEntriesUnlocker.unlock(ApplyFlow)
 
 	for {
@@ -2426,12 +2430,14 @@ func Make(
 	applyCh chan ApplyMsg,
 ) *Raft {
 	onNewCommandIndexSignals := make([]*signal.Signal[telemetry.WithTrace[int]], len(peers))
+	onNewCommandIndexSignalChs := make([]<-chan telemetry.WithTrace[int], len(peers))
 	for peerServerIndex := 0; peerServerIndex < len(peers); peerServerIndex++ {
 		if peerServerIndex == me {
 			continue
 		}
 
 		onNewCommandIndexSignals[peerServerIndex] = signal.NewSignal[telemetry.WithTrace[int]](1)
+		onNewCommandIndexSignalChs[peerServerIndex] = onNewCommandIndexSignals[peerServerIndex].ReceiveChan()
 	}
 
 	var nextCancelContextId uint64 = 0
@@ -2440,6 +2446,9 @@ func Make(
 		EndpointID: me,
 		TraceID:    0,
 	}
+	onNewSnapshotSignal := signal.NewSignal[telemetry.WithTrace[WithCancel[Snapshot]]](1)
+	onMatchIndexChangeSignal := signal.NewSignal[telemetry.WithTrace[int]](1)
+	onCommitIndexChangeSignal := signal.NewSignal[telemetry.WithTrace[int]](1)
 	rf := &Raft{
 		peers:     peers,
 		persister: persister,
@@ -2468,11 +2477,16 @@ func Make(
 		},
 		applyCh:                   applyCh,
 		onNewCommandIndexSignals:  onNewCommandIndexSignals,
-		onNewSnapshotSignal:       signal.NewSignal[telemetry.WithTrace[WithCancel[Snapshot]]](1),
-		onMatchIndexChangeSignal:  signal.NewSignal[telemetry.WithTrace[int]](1),
-		onCommitIndexChangeSignal: signal.NewSignal[telemetry.WithTrace[int]](1),
-		taskTracker:               newTaskTracker(),
-		serverWaitGroup:           &sync.WaitGroup{},
+		onNewSnapshotSignal:       onNewSnapshotSignal,
+		onMatchIndexChangeSignal:  onMatchIndexChangeSignal,
+		onCommitIndexChangeSignal: onCommitIndexChangeSignal,
+
+		onNewCommandIndexReceiveChs:  onNewCommandIndexSignalChs,
+		onNewSnapshotReceiveCh:       onNewSnapshotSignal.ReceiveChan(),
+		onMatchIndexChangeReceiveCh:  onMatchIndexChangeSignal.ReceiveChan(),
+		onCommitIndexChangeReceiveCh: onCommitIndexChangeSignal.ReceiveChan(),
+		serverWaitGroup:              new(sync.WaitGroup),
+		taskTracker:                  newTaskTracker(),
 	}
 
 	rf.readPersist(defaultTrace, persister.ReadRaftState(), persister.ReadSnapshot(), SharedFlow)
