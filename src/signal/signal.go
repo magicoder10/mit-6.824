@@ -13,7 +13,7 @@ type Signal[Data any] struct {
 	mu             *sync.Mutex
 	cond           *sync.Cond
 	isClosed       bool
-	waitForNewData bool
+	waitForNewData int
 }
 
 func (s *Signal[Data]) Send(data Data) bool {
@@ -35,7 +35,8 @@ func (s *Signal[Data]) Send(data Data) bool {
 	s.size++
 	s.nextToWrite = (s.nextToWrite + 1) % s.maxBufferSize
 
-	if s.waitForNewData {
+	if s.waitForNewData > 0 {
+		s.waitForNewData--
 		s.cond.Signal()
 	}
 
@@ -75,7 +76,7 @@ func (s *Signal[Data]) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.isClosed = true
-	s.cond.Signal()
+	s.cond.Broadcast()
 }
 
 func (s *Signal[Data]) receive() (Data, bool) {
@@ -83,10 +84,9 @@ func (s *Signal[Data]) receive() (Data, bool) {
 		return *new(Data), false
 	}
 
-	if s.size == 0 {
-		s.waitForNewData = true
+	for s.size == 0 {
+		s.waitForNewData++
 		s.cond.Wait()
-		s.waitForNewData = false
 	}
 
 	if s.isClosed {

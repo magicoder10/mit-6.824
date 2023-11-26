@@ -1,4 +1,4 @@
-package raft
+package kvraft
 
 import (
 	"fmt"
@@ -7,7 +7,6 @@ import (
 	"runtime"
 
 	internalFmt "6.5840/fmt"
-
 	"6.5840/telemetry"
 )
 
@@ -18,19 +17,14 @@ func init() {
 type Flow string
 
 const (
-	FollowerFlow       Flow = "Follower"
-	CandidateFlow      Flow = "Candidate"
-	LeaderFlow         Flow = "Leader"
-	SharedFlow         Flow = "Shared"
-	HeartbeatFlow      Flow = "Heartbeat"
-	ElectionFlow       Flow = "Election"
-	LogReplicationFlow Flow = "LogReplication"
-	CommitFlow         Flow = "Commit"
-	StateFlow          Flow = "State"
-	TerminationFlow    Flow = "Termination"
-	ApplyFlow          Flow = "Apply"
-	ApplyEntryFlow     Flow = "ApplyEntry"
-	SnapshotFlow       Flow = "Snapshot"
+	InitFlow          Flow = "Init"
+	ExecuteOpFlow     Flow = "ExecuteOp"
+	TerminationFlow   Flow = "Termination"
+	ApplyFlow         Flow = "Apply"
+	ApplyCommandFlow  Flow = "ApplyCommand"
+	ApplySnapshotFlow Flow = "ApplySnapshot"
+	SnapshotFlow      Flow = "Snapshot"
+	RaftStateFlow     Flow = "RaftState"
 )
 
 type LogLevel string
@@ -57,27 +51,21 @@ var logLevelRank = map[LogLevel]int{
 const visibleLogLevel = OffLevel
 
 var visibleFlows = map[Flow]bool{
-	FollowerFlow:  true,
-	CandidateFlow: true,
-	LeaderFlow:    true,
-	SharedFlow:    true,
-	HeartbeatFlow: true,
-	//ElectionFlow:       true,
-	LogReplicationFlow: true,
-	CommitFlow:         true,
-	//StateFlow:          true,
-	//TerminationFlow:    true,
-	ApplyFlow:      true,
-	ApplyEntryFlow: true,
-	//SnapshotFlow:       true,
+	InitFlow:          true,
+	ExecuteOpFlow:     true,
+	ApplyFlow:         true,
+	ApplyCommandFlow:  true,
+	ApplySnapshotFlow: true,
+	SnapshotFlow:      true,
+	RaftStateFlow:     true,
+	TerminationFlow:   true,
 }
 
 type LogContext struct {
-	ServerID int
-	Role     Role
-	Term     int
-	Flow     Flow
-	Trace    *telemetry.Trace
+	EndpointNamespace string
+	EndpointID        int
+	Flow              Flow
+	Trace             *telemetry.Trace
 }
 
 type MessageContext struct {
@@ -103,12 +91,11 @@ func LogAndSkipCallers(ct LogContext, level LogLevel, skipCallers int, format st
 	_, filePath, lineNum, _ := runtime.Caller(skipCallers + 1)
 	_, fileName := filepath.Split(filePath)
 
-	log.Printf("%v:%v [serverID:%v role:%v term:%v flow:%v trace:(%v) goroutines:%v] %v\n",
+	log.Printf("%v:%v [endpoint:(%v/%v) flow:%v trace:(%v) goroutines:%v] %v\n",
 		fileName,
 		lineNum,
-		ct.ServerID,
-		ct.Role,
-		ct.Term,
+		ct.EndpointNamespace,
+		ct.EndpointID,
 		ct.Flow,
 		internalFmt.FromPtr(ct.Trace),
 		runtime.NumGoroutine(),
@@ -132,12 +119,11 @@ func MessageAndSkipCallers(ct MessageContext, level LogLevel, skipCallers int, f
 	_, filePath, lineNum, _ := runtime.Caller(skipCallers + 1)
 	_, fileName := filepath.Split(filePath)
 
-	log.Printf("%v:%v [serverID:%v role:%v term:%v flow:%v trace:(%v) goroutines:%v sender:%v receiver:%v] %v\n",
+	log.Printf("%v:%v [endpoint:(%v/%v) flow:%v trace:(%v) goroutines:%v sender:%v receiver:%v] %v\n",
 		fileName,
 		lineNum,
-		ct.ServerID,
-		ct.Role,
-		ct.Term,
+		ct.EndpointNamespace,
+		ct.EndpointID,
 		ct.Flow,
 		internalFmt.FromPtr(ct.Trace),
 		runtime.NumGoroutine(),

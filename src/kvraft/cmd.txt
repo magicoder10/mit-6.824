@@ -1,0 +1,7 @@
+go run analyze/*.go filter -c raft/.analyze.yaml -o raft/logs/analyze/output -e log -i raft/logs/analyze/TestReElection2A_7034.log
+go run analyze/*.go stats -o raft/logs/analyze/stats-3.txt -i raft/logs/running/TestFigure8Unreliable2C_3.log
+go run analyze/*.go state -o raft/logs/analyze/output/state.log -i raft/logs/running/TestFigure8Unreliable2C_4106.log
+
+rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 50s --iter 1 TestBasic3A TestSpeed3A TestConcurrent3A TestUnreliable3A TestUnreliableOneKey3A TestOnePartition3A TestManyPartitionsOneClient3A TestManyPartitionsManyClients3A TestPersistOneClient3A TestPersistConcurrent3A TestPersistConcurrentUnreliable3A TestPersistPartition3A TestPersistPartitionUnreliable3A TestPersistPartitionUnreliableLinearizable3A
+
+rm -rf logs/running && ../dstest --workers 8 --output logs/running --race --timeout 50s --iter 1 TestSpeed3A

@@ -1,0 +1,187 @@
+pipelines:
+  server-0:
+    - or:
+        - endpoint:\(kvServer/0\)
+        - \[serverID:0
+  server-1:
+    - or:
+        - endpoint:\(kvServer/1\)
+        - \[serverID:1
+  server-2:
+    - or:
+        - endpoint:\(kvServer/2\)
+        - \[serverID:2
+  server-3:
+    - or:
+        - endpoint:\(kvServer/3\)
+        - \[serverID:3
+  server-4:
+    - or:
+        - endpoint:\(kvServer/4\)
+        - \[serverID:4
+  kv-server-0:
+    - or:
+        - endpoint:\(kvServer/0\)
+  kv-server-1:
+    - or:
+        - endpoint:\(kvServer/1\)
+  kv-server-2:
+    - or:
+        - endpoint:\(kvServer/2\)
+  kv-server-3:
+    - or:
+        - endpoint:\(kvServer/3\)
+  kv-server-4:
+    - or:
+        - endpoint:\(kvServer/4\)
+  test:
+    - or:
+        - '2: client new append'
+        - '2: client new get'
+        - 'request succeed: Get\(operationID=\d+, key=2\)'
+        - shutdown servers
+        - restart servers
+  kill:
+    - or:
+        - Kill
+  leader:
+    - or:
+        - role:Leader
+  client:
+    - or:
+        - endpoint:\(kvClient/
+        - shutdown servers
+        - restart servers
+  client-key-2:
+    - or:
+        - key=2
+        - shutdown servers
+        - restart servers
+    - or:
+        - endpoint:\(kvClient/
+        - shutdown servers
+        - restart servers
+  apply:
+    - or:
+        - applyGet
+        - shutdown servers
+        - restart servers
+    - or:
+        - endpoint:\(kvServer/
+        - shutdown servers
+        - restart servers
+  client-1015-op-26:
+    - or:
+        - operationID=26
+        - shutdown servers
+        - restart servers
+    - or:
+        - endpoint:\(kvClient/1015
+        - shutdown servers
+        - restart servers
+  client-arg:
+    - or:
+        - arg=x 0 62 y\)
+  server-arg:
+    - or:
+        - Append enter
+    - or:
+        - Arg:x 0 62 y
+  new-entry:
+    - or:
+        - append new log entry
+  request-succeed:
+    - or:
+        - 'request succeed:'
+  term-1:
+    - or:
+        - term:1
+  term-1-new-entry:
+    - or:
+        - append new log entry
+    - or:
+        - term:1
+  term-1-replicate:
+    - or:
+        - append new log entry
+        - replicated log to
+    - or:
+        - term:1
+  term-1-replicated:
+    - or:
+        - replicated log to
+    - or:
+        - term:1
+  term-1-new-replicate:
+    - or:
+        - new replicateLogToOnePeer loop for
+    - or:
+        - term:1
+  duration:
+    - or:
+        - duration=[0-9.]+ms
+  received-apply-0:
+    - or:
+        - received applyMsg
+    - or:
+        - endpoint:\(kvServer/0\)
+  received-apply-1:
+    - or:
+        - received applyMsg
+    - or:
+        - endpoint:\(kvServer/1\)
+  received-apply-2:
+    - or:
+        - received applyMsg
+    - or:
+        - endpoint:\(kvServer/2\)
+  received-apply-3:
+    - or:
+        - received applyMsg
+    - or:
+        - endpoint:\(kvServer/3\)
+  received-apply-4:
+    - or:
+        - received applyMsg
+    - or:
+        - endpoint:\(kvServer/4\)
+  kv-traces:
+    - or:
+        - trace:\(kvServer/0/645\)
+  kv-trace-1009-42:
+    - or:
+        - trace:\(kvClient/1009/42\)
+    - or:
+        - endpoint:\(kvServer/0\)
+  kv-trace-1005-10:
+    - or:
+        - trace:\(kvClient/1005/10\)
+    - or:
+        - endpoint:\(kvServer/0\)
+  kv-trace-1014-105:
+    - or:
+        - trace:\(kvClient/1014/105\)
+    - or:
+        - endpoint:\(kvServer/0\)
+  kv-trace-1020-105:
+    - or:
+        - trace:\(kvClient/1020/105\)
+    - or:
+        - endpoint:\(kvServer/0\)
+  raft-traces:
+    - or:
+        - trace:\(raft/2/3637\)
+        - trace:\(raft/2/3632\)
+        - trace:\(raft/2/3634\)
+  raft-new-entry:
+    - or:
+        - append new log entry
+  raft-update-commit:
+    - or:
+        - commitIndex updated to
+    - or:
+        - serverID:2
+  locks:
+    - or:
+        - '] lock\('
+        - '] unlock\('
