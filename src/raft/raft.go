@@ -1948,7 +1948,6 @@ func (rf *Raft) applySnapshot(trace telemetry.Trace, cancelContext *CancelContex
 	applyUnlocker.unlock(SnapshotFlow)
 	applyMsg := ApplyMsg{
 		SnapshotValid: true,
-		SnapshotTerm:  snapshot.LastIncludedTerm,
 		SnapshotIndex: snapshot.LastIncludedIndex,
 		Snapshot:      snapshot.Data,
 	}

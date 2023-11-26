@@ -6,16 +6,6 @@ import (
 	"6.5840/telemetry"
 )
 
-type Err string
-
-const (
-	OkErr             Err = "Ok"
-	ErrNoKey          Err = "ErrNoKey"
-	ErrWrongLeaderErr Err = "ErrWrongLeader"
-
-	ErrCancelledErr Err = "ErrCancelled"
-)
-
 type OperationContext struct {
 	Trace       telemetry.Trace
 	ClientID    int

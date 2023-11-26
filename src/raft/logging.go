@@ -57,19 +57,19 @@ var logLevelRank = map[LogLevel]int{
 const visibleLogLevel = OffLevel
 
 var visibleFlows = map[Flow]bool{
-	FollowerFlow:  true,
-	CandidateFlow: true,
-	LeaderFlow:    true,
-	SharedFlow:    true,
-	HeartbeatFlow: true,
-	//ElectionFlow:       true,
+	FollowerFlow:       true,
+	CandidateFlow:      true,
+	LeaderFlow:         true,
+	SharedFlow:         true,
+	HeartbeatFlow:      true,
+	ElectionFlow:       true,
 	LogReplicationFlow: true,
 	CommitFlow:         true,
-	//StateFlow:          true,
-	//TerminationFlow:    true,
-	ApplyFlow:      true,
-	ApplyEntryFlow: true,
-	//SnapshotFlow:       true,
+	StateFlow:          true,
+	TerminationFlow:    true,
+	ApplyFlow:          true,
+	ApplyEntryFlow:     true,
+	SnapshotFlow:       true,
 }
 
 type LogContext struct {

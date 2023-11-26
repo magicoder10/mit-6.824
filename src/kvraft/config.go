@@ -17,10 +17,6 @@ import (
 	"6.5840/raft"
 )
 
-// import "log"
-
-const printConfigDebugLog = true
-
 func randstring(n int) string {
 	b := make([]byte, 2*n)
 	crand.Read(b)
