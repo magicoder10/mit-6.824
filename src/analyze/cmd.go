@@ -23,10 +23,9 @@ type Analyze struct {
 var configFilePath string
 var inputFilePath string
 var outputDir string
-
 var outputFilePath string
-
 var outputFileExt string
+var logLineNumber int
 
 var rootCmd = &cobra.Command{
 	Use:   "analyze",
@@ -82,6 +81,13 @@ var stateCmd = &cobra.Command{
 	},
 }
 
+var queryNetworkStateCmd = &cobra.Command{
+	Use: "network",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return getNetworkState(inputFilePath, logLineNumber)
+	},
+}
+
 func main() {
 	rootCmd.PersistentFlags().StringVarP(&inputFilePath, "input", "i", "", "input file path")
 	err := rootCmd.MarkPersistentFlagRequired("input")
@@ -118,11 +124,19 @@ func main() {
 	}
 
 	stateCmd.PersistentFlags().StringVarP(&outputDir, "outputDir", "o", "", "output directory")
-	err = stateCmd.MarkPersistentFlagRequired("outputDir")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+
+	queryNetworkStateCmd.PersistentFlags().IntVarP(&logLineNumber, "logLine", "l", 0, "log line number")
+	err = queryNetworkStateCmd.MarkPersistentFlagRequired("logLine")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	stateCmd.AddCommand(queryNetworkStateCmd)
 
 	allCmd.PersistentFlags().StringVarP(&configFilePath, "config", "c", "", "config file path")
 	err = allCmd.MarkPersistentFlagRequired("config")
@@ -392,6 +406,10 @@ func parseTaskCount(input string) (TaskCount, error) {
 }
 
 func calcState(inputFilePath string, outputDir string) error {
+	if len(outputDir) == 0 {
+		return fmt.Errorf("output directory is empty")
+	}
+
 	inputFile, err := os.Open(inputFilePath)
 	if err != nil {
 		return err
@@ -419,21 +437,21 @@ func calcState(inputFilePath string, outputDir string) error {
 	defer serversOutputFile.Close()
 
 	state := newState()
-	lineNumber := 1
+	lineNum := 1
 	scanner := bufio.NewScanner(inputFile)
 	for scanner.Scan() {
 		line := scanner.Text()
 		isUpdated := updateNetworkState(&state, line)
 		if isUpdated {
-			_, err = fmt.Fprintf(networkOutputFile, "%d  %s %+v\n", lineNumber, line, state.Network)
+			_, err = fmt.Fprintf(networkOutputFile, "%d  %s %+v\n", lineNum, line, state.Network)
 		}
 
 		isUpdated = updateServerState(&state, line)
 		if isUpdated {
-			_, err = fmt.Fprintf(serversOutputFile, "%d  %s %+v\n", lineNumber, line, state.Servers)
+			_, err = fmt.Fprintf(serversOutputFile, "%d  %s %+v\n", lineNum, line, state.Servers)
 		}
 
-		lineNumber++
+		lineNum++
 	}
 
 	if err == nil {
@@ -553,4 +571,74 @@ func parseCrash(input string) (Crash, bool, error) {
 	return Crash{
 		ServerID: int(serverID),
 	}, true, nil
+}
+
+func getNetworkState(inputFilePath string, logLineNumber int) error {
+	inputFile, err := os.Open(inputFilePath)
+	if err != nil {
+		fmt.Println(err)
+		return nil
+	}
+
+	defer inputFile.Close()
+
+	var prevNetworkState map[int]ConnectionState
+	lineNum := 1
+	scanner := bufio.NewScanner(inputFile)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		logLineNum, networkState, err := parseNetworkState(line)
+		if err != nil {
+			fmt.Println(err)
+			return nil
+		}
+
+		if logLineNum > logLineNumber {
+			break
+		}
+
+		prevNetworkState = networkState
+		lineNum++
+	}
+
+	if prevNetworkState == nil {
+		fmt.Printf("no network state at line %v\n", logLineNumber)
+		return nil
+	}
+
+	fmt.Printf("%+v\n", prevNetworkState)
+	return nil
+}
+
+func parseNetworkState(input string) (int, map[int]ConnectionState, error) {
+	groups := networkStatePattern.FindStringSubmatch(input)
+	if len(groups) != 4 {
+		return 0, nil, nil
+	}
+
+	logLine, err := strconv.ParseInt(groups[1], 0, 64)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	networkStateLine := groups[3]
+	serverConnectionStates := strings.Split(networkStateLine, " ")
+
+	networkState := make(map[int]ConnectionState)
+	for _, serverConnectionState := range serverConnectionStates {
+		serverConnectionGroups := serverConnectionStatePattern.FindStringSubmatch(serverConnectionState)
+		if len(serverConnectionGroups) != 3 {
+			return 0, nil, nil
+		}
+
+		serverID, err := strconv.ParseInt(serverConnectionGroups[1], 10, 64)
+		if err != nil {
+			return 0, nil, err
+		}
+
+		networkState[int(serverID)] = ConnectionState(serverConnectionGroups[2])
+	}
+
+	return int(logLine), networkState, nil
 }
