@@ -100,12 +100,14 @@ def print_results(results: Dict[str, Dict[str, StatsMeter]], timing=False):
     print(table)
 
 
-def run_test(test: str, race: bool, timing: bool, timeout: str):
+def run_test(test: str, completed: int, race: bool, timing: bool, timeout: str, enable_cpu_profile: bool):
     test_cmd = ["go", "test", f"-run={test}", f"-timeout={timeout}"]
     if race:
         test_cmd.append("-race")
     if timing:
         test_cmd = ["time"] + cmd
+    if enable_cpu_profile:
+        test_cmd.append(f"-cpuprofile={test}_{completed}_cpu.prof")
     f, path = tempfile.mkstemp()
     start = time.time()
     proc = subprocess.run(test_cmd, stdout=f, stderr=f)
@@ -137,6 +139,7 @@ def run_tests(
     growth: int            = typer.Option(10,     '--growth',          '-g',    help='Growth ratio of iterations when using --loop'),
     timing: bool           = typer.Option(False,   '--timing',          '-t',    help='Report timing, only works on macOS'),
     timeout: str           = typer.Option('10m',   '--timeout',          '-m',    help='Time out for each test'),
+    cpuprofile: bool       = typer.Option(False,   '--cpuprofile',          '-c',    help='Enable CPU profiling'),
     # fmt: on
 ):
 
@@ -202,7 +205,7 @@ def run_tests(
                     n = len(futures)
                     if n < workers:
                         for test in itertools.islice(test_instances, workers-n):
-                            futures.append(executor.submit(run_test, test, race, timing, timeout))
+                            futures.append(executor.submit(run_test, test, completed, race, timing, timeout, cpuprofile))
 
                     done, not_done = wait(futures, return_when=FIRST_COMPLETED)
 
