@@ -93,6 +93,7 @@ type Raft struct {
 	receivedValidMessage telemetry.WithTrace[bool]
 	commitIndex          telemetry.WithTrace[int]
 	lastAppliedIndex     telemetry.WithTrace[int]
+	isApplyingSnapshot   telemetry.WithTrace[bool]
 
 	// volatile state on leaders
 	nextIndices  []telemetry.WithTrace[int]
@@ -102,12 +103,12 @@ type Raft struct {
 
 	applyCh                   chan ApplyMsg
 	onNewCommandIndexSignals  []*signal.Signal[telemetry.WithTrace[int]]
-	onNewSnapshotSignal       *signal.Signal[telemetry.WithTrace[WithCancel[Snapshot]]]
+	onNewSnapshotSignal       *signal.Signal[telemetry.WithTrace[Snapshot]]
 	onMatchIndexChangeSignal  *signal.Signal[telemetry.WithTrace[int]]
 	onCommitIndexChangeSignal *signal.Signal[telemetry.WithTrace[int]]
 
 	onNewCommandIndexReceiveChs  []<-chan telemetry.WithTrace[int]
-	onNewSnapshotReceiveCh       <-chan telemetry.WithTrace[WithCancel[Snapshot]]
+	onNewSnapshotReceiveCh       <-chan telemetry.WithTrace[Snapshot]
 	onMatchIndexChangeReceiveCh  <-chan telemetry.WithTrace[int]
 	onCommitIndexChangeReceiveCh <-chan telemetry.WithTrace[int]
 
@@ -156,8 +157,11 @@ func (rf *Raft) Snapshot(snapshotLastIncludedIndex int, snapshotData []byte) {
 		LastIncludedTerm:  rf.logTerm(snapshotLastIncludedIndex),
 		Data:              snapshotData,
 	}
-
-	rf.useSnapshot(trace, snapshot)
+	rf.persistSnapshot(trace, snapshot)
+	rf.onCommitIndexChangeSignal.Send(telemetry.WithTrace[int]{
+		Trace: trace,
+		Value: rf.commitIndex.Value,
+	})
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -466,7 +470,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				InfoLevel,
 				"update commitIndex to %v",
 				rf.commitIndex)
-			rf.notifyCommitIndexChange(args.Trace, newCommitIndex)
+			rf.onCommitIndexChangeSignal.Send(telemetry.WithTrace[int]{
+				Trace: args.Trace,
+				Value: newCommitIndex,
+			})
 		}
 	} else {
 		Log(
@@ -479,7 +486,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	unlocker := rf.lock(SnapshotFlow)
 	defer unlocker.unlock(SnapshotFlow)
-
 	Log(
 		rf.logContext(args.Trace, SnapshotFlow),
 		InfoLevel,
@@ -540,7 +546,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	if args.LastIncludedIndex <= rf.snapshot.Value.LastIncludedIndex {
-		Log(rf.logContext(args.Trace, SnapshotFlow), InfoLevel, "snapshot already up to date, exit Snapshot")
+		Log(rf.logContext(args.Trace, SnapshotFlow), InfoLevel, "snapshot already up to date, exit InstallSnapshot")
 		return
 	}
 
@@ -553,7 +559,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		Trace: args.Trace,
 		Value: snapshot.LastIncludedIndex,
 	}
-	rf.useSnapshot(args.Trace, snapshot)
+
+	rf.persistSnapshot(args.Trace, snapshot)
+	rf.onNewSnapshotSignal.Send(telemetry.WithTrace[Snapshot]{
+		Trace: args.Trace,
+		Value: snapshot,
+	})
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -1696,14 +1707,6 @@ func (rf *Raft) updateCommitIndex(trace telemetry.Trace, cancelContext *CancelCo
 			return
 		}
 
-		if rf.applyingSnapshots.Value > 0 {
-			Log(rf.logContext(loopTrace, CommitFlow), InfoLevel, "applying snapshots, skip checking matchIndex: matchIndex=%v, commitIndex=%v",
-				matchIndex,
-				rf.commitIndex)
-			updateIndexUnlocker.unlock(CommitFlow)
-			continue
-		}
-
 		Log(rf.logContext(loopTrace, CommitFlow), InfoLevel, "received matchIndex: matchIndex=%v, commitIndex=%v, snapshot=%v",
 			matchIndex,
 			rf.commitIndex,
@@ -1739,7 +1742,10 @@ func (rf *Raft) tryUpdateCommitIndex(trace telemetry.Trace, matchIndex int) {
 				Value: index,
 			}
 			Log(rf.logContext(trace, CommitFlow), InfoLevel, "commitIndex updated to %v", rf.commitIndex)
-			rf.notifyCommitIndexChange(trace, index)
+			rf.onCommitIndexChangeSignal.Send(telemetry.WithTrace[int]{
+				Trace: trace,
+				Value: index,
+			})
 			return
 		}
 	}
@@ -1775,18 +1781,12 @@ func (rf *Raft) applyCommittedEntriesAndSnapshot(trace telemetry.Trace) {
 			Log(rf.logContext(loopTrace, ApplyEntryFlow), InfoLevel, "[commitIndex-trace:(%v)] received commitIndex: commitIndex=%v",
 				commitIndexWithTrace.Trace,
 				commitIndex)
-			if rf.applyingSnapshots.Value > 0 {
-				Log(rf.logContext(loopTrace, ApplyEntryFlow), InfoLevel, "applying snapshots, skip applying log entries: commitIndex=%v",
-					commitIndex)
-				logUnlocker.unlock(ApplyEntryFlow)
-				continue
-			}
 
 			logUnlocker.unlock(ApplyEntryFlow)
 			if !rf.applyCommittedLogEntries(loopTrace, commitIndex) {
 				return
 			}
-		case snapshotWithTraceAndCancel, ok := <-onNewSnapshotSignalCh:
+		case snapshotWithTrace, ok := <-onNewSnapshotSignalCh:
 			if !ok {
 				logUnlocker := rf.lock(SnapshotFlow)
 				Log(rf.logContext(loopTrace, SnapshotFlow), InfoLevel, "onNewSnapshotSignalCh closed, exit applyCommittedEntriesAndSnapshot")
@@ -1794,14 +1794,12 @@ func (rf *Raft) applyCommittedEntriesAndSnapshot(trace telemetry.Trace) {
 				return
 			}
 
-			snapshotWithCancel := snapshotWithTraceAndCancel.Value
 			Log(rf.logContext(loopTrace, SnapshotFlow), InfoLevel, "[snapshot-trace:(%v)] received new snapshot: snapshot=%v",
-				snapshotWithTraceAndCancel.Trace,
-				snapshotWithCancel.Value)
-			if !rf.applySnapshot(loopTrace, snapshotWithCancel.CancelContext, snapshotWithCancel.Value) {
-				continue
+				snapshotWithTrace.Trace,
+				snapshotWithTrace.Value)
+			if !rf.applySnapshot(loopTrace, snapshotWithTrace.Value) {
+				return
 			}
-
 		case <-rf.serverCancelContext.OnCancel(logContext):
 			logUnlocker := rf.lock(ApplyFlow)
 			Log(rf.logContext(loopTrace, ApplyFlow), InfoLevel, "canceled, exit applyCommittedEntriesAndSnapshot")
@@ -1827,8 +1825,20 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 	Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "received commitIndex: commitIndex=%v, lastAppliedIndex=%v",
 		commitIndex,
 		rf.lastAppliedIndex)
+	relativeIndex := rf.toRelativeIndex(commitIndex)
+	if relativeIndex <= 0 {
+		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "commitIndex outdated due to new snapshot, skipping: commitIndex=%v, relativeIndex=%v, snapshot=%v",
+			commitIndex,
+			relativeIndex,
+			rf.snapshot)
+		applyUnlocker.unlock(ApplyEntryFlow)
+		return true
+	}
+
 	if commitIndex <= rf.lastAppliedIndex.Value {
-		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "commitIndex <= lastAppliedIndex, skip")
+		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "commitIndex already applied, skipping: commitIndex=%v, lastAppliedIndex=%v",
+			commitIndex,
+			rf.lastAppliedIndex)
 		applyUnlocker.unlock(ApplyEntryFlow)
 		return true
 	}
@@ -1858,7 +1868,7 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 			return false
 		}
 
-		relativeIndex := rf.toRelativeIndex(index)
+		relativeIndex = rf.toRelativeIndex(index)
 		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "before applying log entry: commitIndex=%v, lastAppliedIndex=%v, index=%v, relativeIndex=%v, snapshot=%v",
 			commitIndex,
 			rf.lastAppliedIndex,
@@ -1866,6 +1876,7 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 			relativeIndex,
 			rf.snapshot,
 		)
+
 		logEntry := rf.logEntries.Value[relativeIndex]
 		logContext := rf.logContext(trace, ApplyEntryFlow)
 		Log(logContext, InfoLevel, "applying log entry: commitIndex=%v, index=%v, logEntry=%v, logEntries=%v",
@@ -1901,112 +1912,12 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 			Value: index,
 		}
 
-		if cancelContext.IsCanceled(rf.logContext(trace, ApplyEntryFlow)) {
-			Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
-			applyUnlocker.unlock(ApplyEntryFlow)
-			return true
-		}
-
-		if rf.serverCancelContext.IsCanceled(rf.logContext(trace, ApplyEntryFlow)) {
-			Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "canceled, exit applyCommittedLogEntries: commitIndex=%v", commitIndex)
-			applyUnlocker.unlock(ApplyEntryFlow)
-			return false
-		}
-
 		applyUnlocker.unlock(ApplyEntryFlow)
 	}
 
 	applyUnlocker = rf.lock(ApplyEntryFlow)
 	Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "finish applying log entries: commitIndex=%v, lastAppliedIndex=%v", rf.commitIndex, rf.lastAppliedIndex)
 	applyUnlocker.unlock(ApplyEntryFlow)
-	return true
-}
-
-func (rf *Raft) applySnapshot(trace telemetry.Trace, cancelContext *CancelContext, snapshot Snapshot) bool {
-	applyUnlocker := rf.lock(SnapshotFlow)
-	if cancelContext.IsCanceled(rf.logContext(trace, SnapshotFlow)) {
-		rf.applyingSnapshots = telemetry.WithTrace[int]{
-			Trace: trace,
-			Value: rf.applyingSnapshots.Value - 1,
-		}
-		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
-		applyUnlocker.unlock(SnapshotFlow)
-		return true
-	}
-
-	if rf.serverCancelContext.IsCanceled(rf.logContext(trace, SnapshotFlow)) {
-		rf.applyingSnapshots = telemetry.WithTrace[int]{
-			Trace: trace,
-			Value: rf.applyingSnapshots.Value - 1,
-		}
-		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
-		applyUnlocker.unlock(SnapshotFlow)
-		return false
-	}
-
-	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "received snapshot: %+v", snapshot)
-	applyUnlocker.unlock(SnapshotFlow)
-	applyMsg := ApplyMsg{
-		SnapshotValid: true,
-		SnapshotIndex: snapshot.LastIncludedIndex,
-		Snapshot:      snapshot.Data,
-	}
-
-	select {
-	case rf.applyCh <- applyMsg:
-	case <-cancelContext.OnCancel(rf.logContext(trace, SnapshotFlow)):
-		logUnlocker := rf.lock(SnapshotFlow)
-		rf.applyingSnapshots = telemetry.WithTrace[int]{
-			Trace: trace,
-			Value: rf.applyingSnapshots.Value - 1,
-		}
-		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
-		logUnlocker.unlock(SnapshotFlow)
-		return true
-	case <-rf.serverCancelContext.OnCancel(rf.logContext(trace, SnapshotFlow)):
-		logUnlocker := rf.lock(SnapshotFlow)
-		rf.applyingSnapshots = telemetry.WithTrace[int]{
-			Trace: trace,
-			Value: rf.applyingSnapshots.Value - 1,
-		}
-		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
-		logUnlocker.unlock(SnapshotFlow)
-		return false
-	}
-
-	applyUnlocker = rf.lock(SnapshotFlow)
-	defer applyUnlocker.unlock(SnapshotFlow)
-	rf.lastAppliedIndex = telemetry.WithTrace[int]{
-		Trace: trace,
-		Value: snapshot.LastIncludedIndex,
-	}
-	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "finish applying snapshot: lastAppliedIndex=%v",
-		rf.lastAppliedIndex)
-
-	defer func() {
-		rf.applyingSnapshots = telemetry.WithTrace[int]{
-			Trace: trace,
-			Value: rf.applyingSnapshots.Value - 1,
-		}
-	}()
-
-	if cancelContext.IsCanceled(rf.logContext(trace, SnapshotFlow)) {
-		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
-		return true
-	}
-
-	if rf.serverCancelContext.IsCanceled(rf.logContext(trace, SnapshotFlow)) {
-		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "canceled, exit applySnapshot")
-		return false
-	}
-
-	if rf.commitIndex.Value > rf.lastAppliedIndex.Value {
-		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "apply remaining log entries after snapshot: lastAppliedIndex=%v, commitIndex=%v",
-			rf.lastAppliedIndex,
-			rf.commitIndex)
-		rf.notifyCommitIndexChange(trace, rf.commitIndex.Value)
-	}
-
 	return true
 }
 
@@ -2030,22 +1941,11 @@ func (rf *Raft) isReplicatedToMajority(index int) bool {
 	return false
 }
 
-func (rf *Raft) useSnapshot(trace telemetry.Trace, snapshot Snapshot) {
-	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "enter useSnapshot: snapshot=%v, applyEntriesCancelContext=%+v",
-		snapshot,
-		rf.applyEntriesCancelContext)
-
+func (rf *Raft) persistSnapshot(trace telemetry.Trace, snapshot Snapshot) {
 	if rf.applyEntriesCancelContext != nil {
 		rf.applyEntriesCancelContext.TryCancel(rf.logContext(trace, SnapshotFlow))
 		rf.applyEntriesCancelContext = nil
 	}
-
-	if rf.applySnapshotCancelContext != nil {
-		rf.applySnapshotCancelContext.TryCancel(rf.logContext(trace, SnapshotFlow))
-	}
-
-	cancelContext := newCancelContext(trace)
-	rf.applySnapshotCancelContext = cancelContext
 
 	relativeIndex := rf.toRelativeIndex(snapshot.LastIncludedIndex)
 	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "before discarding log entries: snapshotLastIncludedIndex=%v, relativeSnapshotLastIncludedIndex=%v, logEntries=%v",
@@ -2070,19 +1970,43 @@ func (rf *Raft) useSnapshot(trace telemetry.Trace, snapshot Snapshot) {
 	}
 	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "after discarding log entries: logEntries=%v", rf.logEntries)
 	rf.persist(trace, SnapshotFlow)
+}
 
-	rf.applyingSnapshots = telemetry.WithTrace[int]{
-		Trace: trace,
-		Value: rf.applyingSnapshots.Value + 1,
+func (rf *Raft) applySnapshot(trace telemetry.Trace, snapshot Snapshot) bool {
+	applyMsg := ApplyMsg{
+		SnapshotValid: true,
+		SnapshotIndex: snapshot.LastIncludedIndex,
+		Snapshot:      snapshot.Data,
 	}
-	rf.onNewSnapshotSignal.Send(telemetry.WithTrace[WithCancel[Snapshot]]{
+
+	unlocker := rf.lock(SnapshotFlow)
+	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "start applying snapshot: snapshot=%v", rf.snapshot)
+	unlocker.unlock(SnapshotFlow)
+
+	select {
+	case rf.applyCh <- applyMsg:
+	case <-rf.serverCancelContext.OnCancel(rf.logContext(trace, SnapshotFlow)):
+		unlocker = rf.lock(SnapshotFlow)
+		Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "canceled, stop applying snapshot")
+		unlocker.unlock(SnapshotFlow)
+		return false
+	}
+
+	unlocker = rf.lock(SnapshotFlow)
+	defer unlocker.unlock(SnapshotFlow)
+	rf.lastAppliedIndex = telemetry.WithTrace[int]{
 		Trace: trace,
-		Value: WithCancel[Snapshot]{
-			CancelContext: cancelContext,
-			Value:         snapshot,
-		},
-	})
-	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "notified new snapshot to apply: snapshot=%v", rf.snapshot)
+		Value: snapshot.LastIncludedIndex,
+	}
+	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "finish applying snapshot: snapshot=%v, lastAppliedIndex=%v", rf.snapshot, rf.lastAppliedIndex)
+	if rf.commitIndex.Value > rf.lastAppliedIndex.Value {
+		rf.onCommitIndexChangeSignal.Send(telemetry.WithTrace[int]{
+			Trace: trace,
+			Value: rf.commitIndex.Value,
+		})
+	}
+
+	return true
 }
 
 func (rf *Raft) logTerm(logIndex int) int {
@@ -2116,13 +2040,6 @@ func (rf *Raft) toRelativeIndex(absoluteIndex int) int {
 
 func (rf *Raft) toAbsoluteLogIndex(relativeIndex int) int {
 	return rf.snapshot.Value.LastIncludedIndex + relativeIndex + 1
-}
-
-func (rf *Raft) notifyCommitIndexChange(trace telemetry.Trace, newCommitIndex int) {
-	rf.onCommitIndexChangeSignal.Send(telemetry.WithTrace[int]{
-		Trace: trace,
-		Value: newCommitIndex,
-	})
 }
 
 // save Raft's persistent state to stable storage,
@@ -2446,7 +2363,7 @@ func Make(
 		EndpointID: me,
 		TraceID:    0,
 	}
-	onNewSnapshotSignal := signal.NewSignal[telemetry.WithTrace[WithCancel[Snapshot]]](1)
+	onNewSnapshotSignal := signal.NewSignal[telemetry.WithTrace[Snapshot]](1)
 	onMatchIndexChangeSignal := signal.NewSignal[telemetry.WithTrace[int]](1)
 	onCommitIndexChangeSignal := signal.NewSignal[telemetry.WithTrace[int]](1)
 	rf := &Raft{
@@ -2467,10 +2384,6 @@ func Make(
 		},
 		nextIndices:  make([]telemetry.WithTrace[int], len(peers)),
 		matchIndices: make([]telemetry.WithTrace[int], len(peers)),
-		applyingSnapshots: telemetry.WithTrace[int]{
-			Trace: defaultTrace,
-			Value: 0,
-		},
 		currentRole: telemetry.WithTrace[Role]{
 			Trace: defaultTrace,
 			Value: FollowerRole,
@@ -2495,8 +2408,8 @@ func Make(
 	Log(rf.logContext(trace, SharedFlow), InfoLevel, "Make(%v) begin", rf.serverID)
 	cancelContext := newCancelContext(trace)
 	rf.serverCancelContext = cancelContext
-	nextCancelContextId++
 
+	nextCancelContextId++
 	// initialize from state persisted before a crash
 	rf.commitIndex = telemetry.WithTrace[int]{
 		Trace: trace,
@@ -2513,11 +2426,11 @@ func Make(
 
 		rf.applyCommittedEntriesAndSnapshot(trace)
 	}()
-
 	if rf.snapshot.Value.LastIncludedIndex > 0 {
-		unlocker := rf.lock(SharedFlow)
-		rf.useSnapshot(trace, rf.snapshot.Value)
-		unlocker.unlock(SharedFlow)
+		rf.onNewSnapshotSignal.Send(telemetry.WithTrace[Snapshot]{
+			Trace: trace,
+			Value: rf.snapshot.Value,
+		})
 	}
 
 	rf.runAsFollower(trace)

@@ -10,7 +10,9 @@ package raft
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1238,12 +1240,20 @@ func TestSnapshotInit2D(t *testing.T) {
 	cfg.begin("Test (2D): snapshot initialization after crash")
 	cfg.one(rand.Int(), servers, true)
 
+	if printConfigDebugLog {
+		log.Println(fmt.Sprintf("[Test] %v", strings.Repeat("A", 20)))
+	}
+
 	// enough ops to make a snapshot
 	nn := SnapShotInterval + 1
 	for i := 0; i < nn; i++ {
 		cfg.one(rand.Int(), servers, true)
 	}
 
+	if printConfigDebugLog {
+		log.Println(fmt.Sprintf("[Test] %v", strings.Repeat("B", 20)))
+	}
+
 	// crash all
 	for i := 0; i < servers; i++ {
 		cfg.crash1(i)
@@ -1253,11 +1263,19 @@ func TestSnapshotInit2D(t *testing.T) {
 	for i := 0; i < servers; i++ {
 		cfg.start1(i, cfg.applierSnap)
 		cfg.connect(i)
+	}
+
+	if printConfigDebugLog {
+		log.Println(fmt.Sprintf("[Test] %v", strings.Repeat("C", 20)))
 	}
 
 	// a single op, to get something to be written back to persistent storage.
 	cfg.one(rand.Int(), servers, true)
 
+	if printConfigDebugLog {
+		log.Println(fmt.Sprintf("[Test] %v", strings.Repeat("D", 20)))
+	}
+
 	// crash all
 	for i := 0; i < servers; i++ {
 		cfg.crash1(i)
@@ -1269,7 +1287,16 @@ func TestSnapshotInit2D(t *testing.T) {
 		cfg.connect(i)
 	}
 
+	if printConfigDebugLog {
+		log.Println(fmt.Sprintf("[Test] %v", strings.Repeat("E", 20)))
+	}
+
 	// do another op to trigger potential bug
 	cfg.one(rand.Int(), servers, true)
+
+	if printConfigDebugLog {
+		log.Println(fmt.Sprintf("[Test] %v", strings.Repeat("F", 20)))
+	}
+
 	cfg.end()
 }
