@@ -64,7 +64,7 @@ import (
 	"6.5840/telemetry"
 )
 
-const printDebugLog = true
+const printDebugLog = false
 
 type MessageContext struct {
 	Trace      telemetry.Trace
