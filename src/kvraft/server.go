@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -60,14 +61,23 @@ type Operation struct {
 	OperationID uint64
 }
 
-type KVServer struct {
-	mu       sync.Mutex
-	serverID int
-	rf       *raft.Raft
-	applyCh  chan raft.ApplyMsg
+type Snapshot struct {
+	KeyValueMap      map[string]string
+	GetOperations    map[int]Operations[string]
+	PutOperations    map[int]Operations[any]
+	AppendOperations map[int]Operations[any]
+}
 
-	lastKnownLeaderTerm int
-	maxRaftState        int // snapshot if log grows this big
+type KVServer struct {
+	mu        sync.Mutex
+	serverID  int
+	rf        *raft.Raft
+	persister *raft.Persister
+	applyCh   chan raft.ApplyMsg
+
+	lastKnownRaftCommitIndex int
+	lastKnownLeaderTerm      int
+	maxRaftState             int // snapshot if log grows this big
 
 	keyValueMap map[string]string
 
@@ -441,12 +451,12 @@ func (kv *KVServer) applyCommandAndSnapshot(trace telemetry.Trace) {
 		if applyMsg.CommandValid {
 			commandWithTrace := applyMsg.Command.(telemetry.WithTrace[Command])
 			Log(logContext, InfoLevel, "[command-trace:(%v)] before tryApplyCommand", commandWithTrace.Trace)
-			kv.tryApplyCommand(loopTrace, commandWithTrace.Value)
+			kv.tryApplyCommand(loopTrace, commandWithTrace.Value, applyMsg.CommandIndex)
 			continue
 		}
 
 		if applyMsg.SnapshotValid {
-			kv.tryApplySnapshot(loopTrace, applyMsg.SnapshotTerm, applyMsg.SnapshotIndex, applyMsg.Snapshot)
+			kv.tryApplySnapshot(loopTrace, applyMsg.Snapshot)
 			continue
 		}
 
@@ -459,10 +469,13 @@ func (kv *KVServer) applyCommandAndSnapshot(trace telemetry.Trace) {
 func (kv *KVServer) tryApplyCommand(
 	trace telemetry.Trace,
 	command Command,
+	commandIndex int,
 ) {
 	unlocker := kv.lock(ApplyCommandFlow)
 	logContext := kv.logContext(trace, ApplyCommandFlow)
 	Log(logContext, InfoLevel, "tryApplyCommand enter: command=%+v", command)
+	kv.lastKnownRaftCommitIndex = commandIndex
+
 	startAt := time.Now()
 	operation := Operation{
 		ClientID:    command.ClientID,
@@ -604,10 +617,20 @@ func (kv *KVServer) applyGet(trace telemetry.Trace, getOp GetOp) string {
 
 func (kv *KVServer) tryApplySnapshot(
 	trace telemetry.Trace,
-	snapshotTerm int,
-	snapshotIndex int,
-	snapshot []byte,
+	snapshotData []byte,
 ) {
+	snapshot, err := unmarshalSnapshot(snapshotData)
+	if err != nil {
+		Log(kv.logContext(trace, ApplySnapshotFlow), ErrorLevel, "failed to unmarshal snapshot: err=%v", err)
+		return
+	}
+
+	unlocker := kv.lock(ApplySnapshotFlow)
+	defer unlocker.unlock(ApplySnapshotFlow)
+	kv.keyValueMap = snapshot.KeyValueMap
+	kv.getOperations = snapshot.GetOperations
+	kv.putOperations = snapshot.PutOperations
+	kv.appendOperations = snapshot.AppendOperations
 }
 
 func (kv *KVServer) monitorRaftState(trace telemetry.Trace) {
@@ -635,6 +658,19 @@ func (kv *KVServer) monitorRaftState(trace telemetry.Trace) {
 		}
 
 		logContext := kv.logContext(loopTrace, RaftStateFlow)
+
+		if kv.maxRaftState >= 0 {
+			if kv.persister.RaftStateSize() >= kv.maxRaftState {
+				Log(logContext, InfoLevel, "taking snapshot: raftStateSize=%v, maxRaftState=%v", kv.maxRaftState, kv.persister.RaftStateSize())
+				snapshotData, err := kv.marshalSnapshot()
+				if err != nil {
+					Log(logContext, ErrorLevel, "failed to marshal snapshot: err=%v", err)
+				} else {
+					kv.rf.Snapshot(kv.lastKnownRaftCommitIndex, snapshotData)
+				}
+			}
+		}
+
 		unlocker.unlock(RaftStateFlow)
 
 		Log(logContext, DebugLevel, "check raft state again after %v", monitorRaftStateInterval)
@@ -648,6 +684,16 @@ func (kv *KVServer) monitorRaftState(trace telemetry.Trace) {
 			return
 		}
 	}
+}
+
+func (kv *KVServer) marshalSnapshot() ([]byte, error) {
+	snapshot := Snapshot{
+		KeyValueMap:      kv.keyValueMap,
+		GetOperations:    kv.getOperations,
+		PutOperations:    kv.putOperations,
+		AppendOperations: kv.appendOperations,
+	}
+	return json.Marshal(snapshot)
 }
 
 func (kv *KVServer) notifyLostLeadership() {
@@ -724,6 +770,12 @@ func (kv *KVServer) unlock(lockID uint64, flow Flow, skipCallers int) {
 	kv.mu.Unlock()
 }
 
+func unmarshalSnapshot(snapshotData []byte) (Snapshot, error) {
+	snapshot := Snapshot{}
+	err := json.Unmarshal(snapshotData, &snapshot)
+	return snapshot, err
+}
+
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -756,6 +808,7 @@ func StartKVServer(
 	kv := KVServer{
 		serverID:            serverID,
 		rf:                  rf,
+		persister:           persister,
 		applyCh:             applyCh,
 		maxRaftState:        maxRaftState,
 		keyValueMap:         make(map[string]string),
