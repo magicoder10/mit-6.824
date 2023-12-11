@@ -4,6 +4,7 @@ import (
 	crand "crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"math/big"
 	"math/rand"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"6.5840/labrpc"
 	"6.5840/raft"
 )
+
+const printDebugLog = false
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -403,6 +406,10 @@ func (cfg *config) begin(description string) {
 }
 
 func (cfg *config) op() {
+	if printDebugLog {
+		log.Printf("Ops=%v\n", atomic.LoadInt32(&cfg.ops))
+	}
+
 	atomic.AddInt32(&cfg.ops, 1)
 }
 
