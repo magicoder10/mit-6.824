@@ -1826,7 +1826,7 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 		commitIndex,
 		rf.lastAppliedIndex)
 	relativeIndex := rf.toRelativeIndex(commitIndex)
-	if relativeIndex <= 0 {
+	if relativeIndex < 0 {
 		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "commitIndex outdated due to new snapshot, skipping: commitIndex=%v, relativeIndex=%v, snapshot=%v",
 			commitIndex,
 			relativeIndex,
