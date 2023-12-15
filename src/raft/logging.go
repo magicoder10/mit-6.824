@@ -41,8 +41,7 @@ const (
 	WarnLevel  LogLevel = "Warn"
 	ErrorLevel LogLevel = "Error"
 	FatalLevel LogLevel = "Fatal"
-
-	OffLevel LogLevel = "Off"
+	OffLevel   LogLevel = "Off"
 )
 
 var logLevelRank = map[LogLevel]int{
