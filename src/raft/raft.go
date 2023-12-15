@@ -1841,15 +1841,6 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 	Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "received commitIndex: commitIndex=%v, lastAppliedIndex=%v",
 		commitIndex,
 		rf.lastAppliedIndex)
-	//relativeIndex := rf.toRelativeIndex(commitIndex)
-	//if relativeIndex < 0 {
-	//	Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "commitIndex outdated due to new snapshot, skipping: commitIndex=%v, relativeIndex=%v, snapshot=%v",
-	//		commitIndex,
-	//		relativeIndex,
-	//		rf.snapshot)
-	//	applyUnlocker.unlock(ApplyEntryFlow)
-	//	return true
-	//}
 
 	if commitIndex <= rf.lastAppliedIndex.Value {
 		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "commitIndex already applied, skipping: commitIndex=%v, lastAppliedIndex=%v",
