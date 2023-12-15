@@ -139,7 +139,7 @@ func (rf *Raft) Snapshot(snapshotLastIncludedIndex int, snapshotData []byte) {
 	unlocker := rf.lock(SnapshotFlow)
 	defer unlocker.unlock(SnapshotFlow)
 	trace := rf.newTrace()
-	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "enter Snapshot: snapshotLastIncludedIndex=%v", snapshotLastIncludedIndex)
+	Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "enter Snapshot: snapshotLastIncludedIndex=%v, snapshot=%v", snapshotLastIncludedIndex, rf.snapshot.Value)
 	defer Log(rf.logContext(trace, SnapshotFlow), InfoLevel, "exit Snapshot")
 
 	if rf.serverCancelContext.IsCanceled(rf.logContext(trace, SnapshotFlow)) {
@@ -489,8 +489,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	Log(
 		rf.logContext(args.Trace, SnapshotFlow),
 		InfoLevel,
-		"enter InstallSnapshot: args=%+v",
-		args)
+		"enter InstallSnapshot: args=%+v, lastAppliedIndex=%+v",
+		args,
+		rf.lastAppliedIndex)
 	defer Log(
 		rf.logContext(args.Trace, SnapshotFlow),
 		InfoLevel,
@@ -555,16 +556,23 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		LastIncludedTerm:  args.LastIncludedTerm,
 		Data:              args.Data,
 	}
-	rf.commitIndex = telemetry.WithTrace[int]{
-		Trace: args.Trace,
-		Value: snapshot.LastIncludedIndex,
-	}
 
 	rf.persistSnapshot(args.Trace, snapshot)
-	rf.onNewSnapshotSignal.Send(telemetry.WithTrace[Snapshot]{
-		Trace: args.Trace,
-		Value: snapshot,
-	})
+	if snapshot.LastIncludedIndex > rf.commitIndex.Value {
+		Log(rf.logContext(args.Trace, SnapshotFlow), InfoLevel, "update commitIndex to %v", snapshot.LastIncludedIndex)
+		rf.commitIndex = telemetry.WithTrace[int]{
+			Trace: args.Trace,
+			Value: snapshot.LastIncludedIndex,
+		}
+	}
+
+	if snapshot.LastIncludedIndex > rf.lastAppliedIndex.Value {
+		Log(rf.logContext(args.Trace, SnapshotFlow), InfoLevel, "notify applying snapshot %v", snapshot.LastIncludedIndex)
+		rf.onNewSnapshotSignal.Send(telemetry.WithTrace[Snapshot]{
+			Trace: args.Trace,
+			Value: snapshot,
+		})
+	}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -1822,18 +1830,17 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 		return false
 	}
 
-	Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "received commitIndex: commitIndex=%v, lastAppliedIndex=%v",
-		commitIndex,
-		rf.lastAppliedIndex)
-	relativeIndex := rf.toRelativeIndex(commitIndex)
-	if relativeIndex < 0 {
-		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "commitIndex outdated due to new snapshot, skipping: commitIndex=%v, relativeIndex=%v, snapshot=%v",
-			commitIndex,
-			relativeIndex,
+	if rf.lastAppliedIndex.Value < rf.snapshot.Value.LastIncludedIndex {
+		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "yield for pending snapshot, exit applyCommittedLogEntries: lastAppliedIndex=%v, snapshot=%v",
+			rf.lastAppliedIndex.Value,
 			rf.snapshot)
 		applyUnlocker.unlock(ApplyEntryFlow)
 		return true
 	}
+
+	Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "received commitIndex: commitIndex=%v, lastAppliedIndex=%v",
+		commitIndex,
+		rf.lastAppliedIndex)
 
 	if commitIndex <= rf.lastAppliedIndex.Value {
 		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "commitIndex already applied, skipping: commitIndex=%v, lastAppliedIndex=%v",
@@ -1868,7 +1875,7 @@ func (rf *Raft) applyCommittedLogEntries(trace telemetry.Trace, commitIndex int)
 			return false
 		}
 
-		relativeIndex = rf.toRelativeIndex(index)
+		relativeIndex := rf.toRelativeIndex(index)
 		Log(rf.logContext(trace, ApplyEntryFlow), InfoLevel, "before applying log entry: commitIndex=%v, lastAppliedIndex=%v, index=%v, relativeIndex=%v, snapshot=%v",
 			commitIndex,
 			rf.lastAppliedIndex,

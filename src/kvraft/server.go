@@ -153,7 +153,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	Log(kv.logContext(args.OperationContext.Trace, ExecuteOpFlow), InfoLevel, "Accept Get at term %v", term)
+	Log(kv.logContext(args.OperationContext.Trace, ExecuteOpFlow), InfoLevel, "accept Get at term %v: %+v", term, command)
 	kv.lastKnownLeaderTerm = term
 	logContext := kv.logContext(args.OperationContext.Trace, ExecuteOpFlow)
 	unlocker.unlock(ExecuteOpFlow)
@@ -245,7 +245,7 @@ func (kv *KVServer) Put(args *PutArgs, reply *PutReply) {
 		return
 	}
 
-	Log(kv.logContext(args.OperationContext.Trace, ExecuteOpFlow), InfoLevel, "accept Put at term %v", term)
+	Log(kv.logContext(args.OperationContext.Trace, ExecuteOpFlow), InfoLevel, "accept Put at term %v: %+v", term, command)
 	kv.lastKnownLeaderTerm = term
 	logContext := kv.logContext(args.OperationContext.Trace, ExecuteOpFlow)
 	unlocker.unlock(ExecuteOpFlow)
@@ -334,7 +334,7 @@ func (kv *KVServer) Append(args *AppendArgs, reply *AppendReply) {
 		return
 	}
 
-	Log(kv.logContext(args.OperationContext.Trace, ExecuteOpFlow), InfoLevel, "Accept Append at term %v: %+v", term, command)
+	Log(kv.logContext(args.OperationContext.Trace, ExecuteOpFlow), InfoLevel, "accept Append at term %v: %+v", term, command)
 	kv.lastKnownLeaderTerm = term
 	logContext := kv.logContext(args.OperationContext.Trace, ExecuteOpFlow)
 	unlocker.unlock(ExecuteOpFlow)
@@ -660,13 +660,15 @@ func (kv *KVServer) monitorRaftState(trace telemetry.Trace) {
 		logContext := kv.logContext(loopTrace, RaftStateFlow)
 
 		if kv.maxRaftState >= 0 {
-			if kv.persister.RaftStateSize() >= kv.maxRaftState {
-				Log(logContext, InfoLevel, "taking snapshot: raftStateSize=%v, maxRaftState=%v", kv.maxRaftState, kv.persister.RaftStateSize())
+			raftStateSize := kv.persister.RaftStateSize()
+			if raftStateSize >= kv.maxRaftState {
+				Log(logContext, InfoLevel, "before taking snapshot: raftStateSize=%v, maxRaftState=%v, lastKnownRaftCommitIndex=%v", raftStateSize, kv.maxRaftState, kv.lastKnownRaftCommitIndex)
 				snapshotData, err := kv.marshalSnapshot()
 				if err != nil {
 					Log(logContext, ErrorLevel, "failed to marshal snapshot: err=%v", err)
 				} else {
 					kv.rf.Snapshot(kv.lastKnownRaftCommitIndex, snapshotData)
+					Log(logContext, InfoLevel, "after taking snapshot: raftStateSize=%v", kv.persister.RaftStateSize())
 				}
 			}
 		}
@@ -753,8 +755,9 @@ func (kv *KVServer) lock(flow Flow) *Unlocker {
 	kv.nextLockID++
 	LogAndSkipCallers(
 		LogContext{
-			EndpointID: kv.serverID,
-			Flow:       flow,
+			EndpointNamespace: serverNamespace,
+			EndpointID:        kv.serverID,
+			Flow:              flow,
 		}, DebugLevel, 1, "lock(%v)", nextLockID)
 	return &Unlocker{
 		lockID:     nextLockID,
@@ -764,8 +767,9 @@ func (kv *KVServer) lock(flow Flow) *Unlocker {
 
 func (kv *KVServer) unlock(lockID uint64, flow Flow, skipCallers int) {
 	LogAndSkipCallers(LogContext{
-		EndpointID: kv.serverID,
-		Flow:       flow,
+		EndpointNamespace: serverNamespace,
+		EndpointID:        kv.serverID,
+		Flow:              flow,
 	}, DebugLevel, skipCallers+1, "unlock(%v)", lockID)
 	kv.mu.Unlock()
 }
