@@ -1795,8 +1795,8 @@ func (rf *Raft) applyCommittedEntriesAndSnapshot(trace telemetry.Trace) {
 				return
 			}
 		case snapshotWithTrace, ok := <-onNewSnapshotSignalCh:
+			logUnlocker := rf.lock(SnapshotFlow)
 			if !ok {
-				logUnlocker := rf.lock(SnapshotFlow)
 				Log(rf.logContext(loopTrace, SnapshotFlow), InfoLevel, "onNewSnapshotSignalCh closed, exit applyCommittedEntriesAndSnapshot")
 				logUnlocker.unlock(SnapshotFlow)
 				return
@@ -1805,6 +1805,7 @@ func (rf *Raft) applyCommittedEntriesAndSnapshot(trace telemetry.Trace) {
 			Log(rf.logContext(loopTrace, SnapshotFlow), InfoLevel, "[snapshot-trace:(%v)] received new snapshot: snapshot=%v",
 				snapshotWithTrace.Trace,
 				snapshotWithTrace.Value)
+			logUnlocker.unlock(SnapshotFlow)
 			if !rf.applySnapshot(loopTrace, snapshotWithTrace.Value) {
 				return
 			}
