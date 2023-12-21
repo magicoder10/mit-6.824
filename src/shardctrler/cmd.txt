@@ -1,0 +1,2 @@
+go run analyze/*.go all -c shardctrler/.analyze.yaml -o shardctrler/logs/analyze/output -i shardctrler/logs/running/TestBasic_1.log
+rm -rf logs/running && ../dstest --workers 14 --output logs/running --race --timeout 50s --iter 5000 TestBasic TestMulti

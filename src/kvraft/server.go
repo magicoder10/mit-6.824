@@ -425,7 +425,7 @@ func (kv *KVServer) applyCommandAndSnapshot(trace telemetry.Trace) {
 		case applyMsg, ok = <-kv.applyCh:
 			if !ok {
 				logUnlocker := kv.lock(ApplyFlow)
-				Log(kv.logContext(loopTrace, SnapshotFlow), InfoLevel, "applyCh closed, exit applyCommandAndSnapshot")
+				Log(kv.logContext(loopTrace, ApplyFlow), InfoLevel, "applyCh closed, exit applyCommandAndSnapshot")
 				logUnlocker.unlock(ApplyFlow)
 				return
 			}

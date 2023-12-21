@@ -1,5 +1,7 @@
 package shardctrler
 
+import "6.5840/telemetry"
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -28,14 +30,23 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
-const (
-	OK = "OK"
-)
-
 type Err string
 
+const (
+	OkErr             Err = "Ok"
+	ErrWrongLeaderErr Err = "ErrWrongLeader"
+	ErrCancelledErr   Err = "ErrCancelled"
+)
+
+type OperationContext struct {
+	Trace       telemetry.Trace
+	ClientID    int
+	OperationID uint64
+}
+
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	OperationContext OperationContext
+	Servers          map[int][]string // new GID -> servers mappings
 }
 
 type JoinReply struct {
@@ -44,7 +55,8 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	OperationContext OperationContext
+	GIDs             []int
 }
 
 type LeaveReply struct {
@@ -53,8 +65,9 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	OperationContext OperationContext
+	Shard            int
+	GID              int
 }
 
 type MoveReply struct {
@@ -63,7 +76,8 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	OperationContext OperationContext
+	Num              int // desired config number
 }
 
 type QueryReply struct {
