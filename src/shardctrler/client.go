@@ -73,6 +73,9 @@ func (ck *Clerk) Query(num int) Config {
 				return reply.Config
 			}
 		}
+
+		Log(ck.logContext(trace, ExecuteOpFlow), InfoLevel, "no leader found, retry after %v", retryInterval)
+		<-time.After(retryInterval)
 	}
 }
 
@@ -246,6 +249,9 @@ func (ck *Clerk) Move(shard int, gid int) {
 				return
 			}
 		}
+
+		Log(ck.logContext(trace, ExecuteOpFlow), InfoLevel, "no leader found, retry after %v", retryInterval)
+		<-time.After(retryInterval)
 	}
 }
 
