@@ -49,7 +49,7 @@ func (ck *Clerk) Get(key string) string {
 			}
 			mc := labrpc.MessageContext{
 				Trace:      loopTrace,
-				SenderID:   0,
+				SenderID:   ck.id,
 				ReceiverID: serverID,
 			}
 			Log(ck.logContext(loopTrace, ExecuteOpFlow), InfoLevel, "send Get(operationID=%v, key=%v)", operationID, key)
@@ -113,7 +113,7 @@ func (ck *Clerk) Put(key string, value string) {
 			}
 			mc := labrpc.MessageContext{
 				Trace:      loopTrace,
-				SenderID:   0,
+				SenderID:   ck.id,
 				ReceiverID: serverID,
 			}
 
@@ -173,7 +173,7 @@ func (ck *Clerk) Append(key string, arg string) {
 			}
 			mc := labrpc.MessageContext{
 				Trace:      loopTrace,
-				SenderID:   0,
+				SenderID:   ck.id,
 				ReceiverID: serverID,
 			}
 			Log(ck.logContext(loopTrace, ExecuteOpFlow), InfoLevel, "send Append(operationID=%v, key=%v, arg=%v)", operationID, key, arg)
